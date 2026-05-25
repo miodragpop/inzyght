@@ -305,8 +305,16 @@ void BlockchainState::update_state_on_block_event()
 
         parse_one(0, kMethodNames[0], cached_blockchain_info_response);
         parse_one(1, kMethodNames[1], cached_network_info_response);
+        // getpeerinfo returns an array — glaze appends to existing vector, so clear first.
+        cached_peer_info_response.clear();
         parse_one(2, kMethodNames[2], cached_peer_info_response);
         parse_one(3, kMethodNames[3], cached_mining_info_response);
+        // getrawmempool returns an object {txid: info}. Glaze parses into an
+        // existing std::map by inserting/updating, NOT replacing — so stale
+        // txids from prior calls would never get evicted and the count would
+        // only ever grow. Clear before parsing so removed txids actually
+        // leave the cache.
+        cached_raw_mempool_response.clear();
         parse_one(4, kMethodNames[4], cached_raw_mempool_response);
     }
 
