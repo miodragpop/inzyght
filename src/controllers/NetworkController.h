@@ -1,0 +1,28 @@
+#pragma once
+
+#include <drogon/HttpController.h>
+
+using namespace drogon;
+
+class NetworkController : public HttpController<NetworkController>
+{
+    public:
+        METHOD_LIST_BEGIN
+        ADD_METHOD_TO(NetworkController::get_network_info,    "/api/v1/network/info",       Get, "ApiRateLimiter");
+        ADD_METHOD_TO(NetworkController::get_blockchain_info, "/api/v1/network/blockchain", Get, "ApiRateLimiter");
+        ADD_METHOD_TO(NetworkController::get_peers,           "/api/v1/network/peers",      Get, "ApiRateLimiter");
+        ADD_METHOD_TO(NetworkController::get_state,           "/api/v1/state",              Get, "ApiRateLimiter");
+        ADD_METHOD_TO(NetworkController::get_version,         "/api/v1/version",            Get, "ApiRateLimiter");
+        METHOD_LIST_END
+
+        void get_network_info(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+
+        void get_blockchain_info(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+
+        void get_peers(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+
+        void get_state(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+
+        void get_version(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+
+};

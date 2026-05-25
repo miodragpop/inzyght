@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inzyght - Network Peers</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/css/jsvectormap.min.css" rel="stylesheet">
+    <link href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+
+    <style>
+        #peer-map {
+            height: 420px;
+            background: #1a1a2e;
+            border-radius: 8px;
+        }
+        .flag {
+            font-size: 1.3em;
+            margin-right: 6px;
+        }
+        .badge-inbound  { background-color: #0dcaf0; color: #000; }
+        .badge-outbound { background-color: #198754; }
+    </style>
+    <script src="/js/theme.js"></script>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+</head>
+<body>
+
+    <div id="nav-placeholder" style="position:sticky;top:0;z-index:1030"></div>
+    <script>
+        fetch('/partials/header.html').then(r => r.text()).then(html => {
+            document.getElementById('nav-placeholder').innerHTML = html;
+            const _p = window.location.pathname;
+            document.querySelectorAll('#main-nav .nav-link').forEach(function(a) {
+                const _h = a.getAttribute('href');
+                if (_h === _p || (_h !== '/' && _p.startsWith(_h))) a.classList.add('active');
+            });
+            if (window.syncThemeButton) syncThemeButton();
+            const path = window.location.pathname;
+            document.querySelectorAll('#main-nav .nav-link').forEach(a => {
+                if (a.getAttribute('href') === path) a.classList.add('active');
+            });
+        });
+    </script>
+
+    <!-- Addnode Export Modal -->
+    <div class="modal fade" id="addnodeModal" tabindex="-1" aria-labelledby="addnodeModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addnodeModalLabel"><i class="fa fa-list"></i> Addnode List</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small">Paste these lines into your <code>ycash.conf</code> to connect to current peers.</p>
+                    <textarea id="addnode-text" class="form-control font-monospace" rows="12" readonly></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" id="copy-addnode-btn">
+                        <i class="fa fa-copy"></i> Copy to Clipboard
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container-fluid py-4">
+        <div class="d-flex align-items-center mb-4">
+            <h2 class="mb-0"><i class="fa fa-globe text-info"></i> Network Peers</h2>
+            <button class="btn btn-outline-info btn-sm ms-auto" data-bs-toggle="modal" data-bs-target="#addnodeModal">
+                <i class="fa fa-download"></i> Export addnode list
+            </button>
+        </div>
+
+        <!-- Map -->
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-body p-2">
+                <div id="peer-map"></div>
+                <div class="text-muted text-end mt-1" style="font-size:0.75rem">
+                    <i class="fa fa-info-circle"></i> Hold <kbd>Ctrl</kbd> and scroll to zoom the map
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary row -->
+        <div class="row g-3 mb-4">
+            <div class="col-6 col-md-3">
+                <div class="card text-center border-0 shadow-sm">
+                    <div class="card-body py-3">
+                        <h4 id="total-peers" class="mb-0">---</h4>
+                        <small class="text-muted">Total Peers</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card text-center border-0 shadow-sm">
+                    <div class="card-body py-3">
+                        <h4 id="inbound-peers" class="mb-0">---</h4>
+                        <small class="text-muted">Inbound</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card text-center border-0 shadow-sm">
+                    <div class="card-body py-3">
+                        <h4 id="outbound-peers" class="mb-0">---</h4>
+                        <small class="text-muted">Outbound</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card text-center border-0 shadow-sm">
+                    <div class="card-body py-3">
+                        <h4 id="country-count" class="mb-0">---</h4>
+                        <small class="text-muted">Countries</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Peers table -->
+        <div class="card border-0 shadow-sm">
+            <div class="card-body p-0">
+                <table id="peers-table" class="table table-hover mb-0" style="width:100%">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Country</th>
+                            <th>City</th>
+                            <th>Direction</th>
+                            <th>Ping</th>
+                            <th>Client</th>
+                            <th>Synced</th>
+                        </tr>
+                    </thead>
+                    <tbody id="peers-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-dark text-white py-4 mt-5">
+        <div class="container text-center">
+            <small class="text-muted">Inzyght &mdash; Ycash Blockchain Explorer</small>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/js/jsvectormap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/maps/world.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+    <script src="js/network.js"></script>
+</body>
+</html>

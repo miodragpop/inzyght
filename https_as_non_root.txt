@@ -1,0 +1,149 @@
+In drogon_config.json, change the listener to use HTTPS and fill in the SSL cert/key paths:
+
+
+"listeners": [
+  {
+    "address": "0.0.0.0",
+    "port": 443,
+    "https": true
+  }
+],
+"ssl": {
+  "cert": "/path/to/fullchain.pem",
+  "key": "/path/to/privkey.pem",
+  "key_password": "",
+  "conf_commands": []
+}
+A few practical notes:
+
+Self-signed cert (for testing): openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+Let's Encrypt (production): use certbot, certs land in /etc/letsencrypt/live/yourdomain/ — use fullchain.pem and privkey.pem
+Port 443 requires running as root or setting a capability: sudo setcap cap_net_bind_service=+ep ./inzyght
+You can run both HTTP and HTTPS simultaneously by adding a second entry to the listeners array:
+
+"listeners": [
+  { "address": "0.0.0.0", "port": 80,  "https": false },
+  { "address": "0.0.0.0", "port": 443, "https": true  }
+]
+Drogon doesn't do HTTP→HTTPS redirect automatically though — you'd need a reverse proxy (nginx) in front for that, which is the more common production setup anyway.
+
+So with sudo setcap cap_net_bind_service=+ep ./inzyght I don't run inzyght as root to serve on https port? What about access rights on cer and key file?
+Correct — setcap grants just that one capability to the binary so it can bind to ports below 1024 without running as root.
+
+For cert/key file permissions, Let's Encrypt certs land in /etc/letsencrypt/live/ which is root-owned. Two common approaches:
+
+Option 1 — Add your user to the ssl-cert group (cleanest)
+
+
+# Copy certs to a location your user can read
+sudo mkdir -p /etc/inzyght/ssl
+sudo cp /etc/letsencrypt/live/yourdomain/fullchain.pem /etc/inzyght/ssl/
+sudo cp /etc/letsencrypt/live/yourdomain/privkey.pem /etc/inzyght/ssl/
+sudo chown root:youruser /etc/inzyght/ssl/privkey.pem
+sudo chmod 640 /etc/inzyght/ssl/privkey.pem
+sudo chmod 644 /etc/inzyght/ssl/fullchain.pem
+Option 2 — Use a deploy hook so certbot copies on renewal automatically
+
+/etc/letsencrypt/renewal-hooks/deploy/copy-inzyght.sh:
+
+
+#!/bin/bash
+cp /etc/letsencrypt/live/yourdomain/fullchain.pem /etc/inzyght/ssl/
+cp /etc/letsencrypt/live/yourdomain/privkey.pem /etc/inzyght/ssl/
+chown root:youruser /etc/inzyght/ssl/privkey.pem
+chmod 640 /etc/inzyght/ssl/privkey.pem
+
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/copy-inzyght.sh
+This way renewal is automatic and inzyght always has fresh certs without ever needing root to run. Don't point drogon_config.json directly at /etc/letsencrypt/live/ — that directory is only readable by root.
+
+
+
+Without a reverse proxy, the subpath /inzyght has to be handled by Drogon itself — meaning every route and every static asset path needs the /inzyght prefix. That's a non-trivial change touching:
+
+All route registrations in every controller (/blocks → /inzyght/blocks, /api/v1/... → /inzyght/api/v1/...)
+All fetch('/api/...') calls in frontend JS
+All href="/..." links in HTML
+document_root static file serving
+Honest recommendation: just point the domain root at inzyght instead:
+
+
+https://miodrag.zone/   →   inzyght running on port 443
+That way zero code changes are needed. If you need other things on miodrag.zone alongside inzyght in the future, that's when a reverse proxy earns its keep.
+
+If you're set on the subpath, the least-invasive approach without nginx would be a subdomain instead:
+
+
+https://inzyght.miodrag.zone/
+This requires only:
+
+A DNS A record pointing inzyght.miodrag.zone to your server IP
+A separate Let's Encrypt cert for that subdomain (certbot certonly -d inzyght.miodrag.zone)
+Drogon configured with that cert on port 443
+No code changes to routes or frontend. Subdomains are essentially free with Let's Encrypt and most DNS providers.
+
+Let's Encrypt certificates are free indeed, but short living
+90 days, yes — but renewal is fully automatic with certbot's systemd timer that gets installed alongside it:
+
+
+# Verify the timer is active after certbot install
+systemctl status certbot.timer
+It runs twice daily and renews any cert within 30 days of expiry. Combined with the deploy hook from earlier that copies the renewed certs to /etc/inzyght/ssl/, the whole cycle is hands-off.
+
+The only manual step you'd ever need is restarting inzyght after renewal so it picks up the new cert files — add that to the deploy hook:
+
+
+#!/bin/bash
+cp /etc/letsencrypt/live/inzyght.miodrag.zone/fullchain.pem /etc/inzyght/ssl/
+cp /etc/letsencrypt/live/inzyght.miodrag.zone/privkey.pem   /etc/inzyght/ssl/
+chown root:youruser /etc/inzyght/ssl/privkey.pem
+chmod 640 /etc/inzyght/ssl/privkey.pem
+systemctl restart inzyght
+That assumes inzyght runs as a systemd service. If you haven't set that up yet, a basic unit file would be:
+
+
+# /etc/systemd/system/inzyght.service
+[Unit]
+Description=Inzyght Ycash Explorer
+After=network.target postgresql.service
+
+[Service]
+User=youruser
+WorkingDirectory=/path/to/inzyght
+ExecStart=/path/to/inzyght/inzyght
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now inzyght
+
+
+
+
+
+is there a way to reload cert without shutting down inzyght?
+Drogon doesn't support live TLS certificate reload (no SIGHUP-style cert reload like nginx has). The options are:
+
+Option 1 — Minimal downtime restart via systemd (simplest, ~1 second gap)
+
+
+systemctl restart inzyght
+Systemd restarts it fast enough that it's barely noticeable for users.
+
+Option 2 — Zero downtime with systemd socket activation (more complex)
+Systemd holds the listening socket open while inzyght restarts, so connections queue rather than get refused. Requires adding to the unit file:
+
+
+[Socket]
+ListenStream=443
+
+[Service]
+# ...existing config...
+NonBlocking=true
+But this needs code changes in main.cc to accept the passed file descriptor rather than binding itself — non-trivial.
+
+Option 3 — Avoid the problem entirely with a short-lived side process
+Run a tiny TLS terminator like stunnel or hitch in front of inzyght (on 443), which do support cert reload, while inzyght itself stays on a plain HTTP port internally. These are much lighter than nginx/apache and single-purpose.
+
+Practical recommendation: Option 1 is fine for a blockchain explorer. Cert renewal happens at most a few times per year, and a 1-second restart at 3am (when certbot typically runs) is a non-issue. Just add Restart=on-failure and RestartSec=1 to the systemd unit and move on.

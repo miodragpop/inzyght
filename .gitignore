@@ -1,0 +1,75 @@
+# ============================================================================
+# Build outputs
+# ============================================================================
+# CMake build directories (including FetchContent clones of curl/zmq/glaze/
+# drogon — hundreds of MB, all reproducible from CMakeLists.txt).
+/build/
+/build_debug/
+/build_test/
+/cmake-build-*/
+/deps/
+
+# Compiled binaries / object files / archives anywhere in the tree.
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+ycash_explorer
+inzyght
+
+# CMake metadata that can leak into the source tree from in-source builds.
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# ============================================================================
+# Runtime data — logs, indexer state, uploads, local DBs
+# ============================================================================
+logs/
+*.log
+data/
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================================================
+# Config with credentials / per-host settings
+# ============================================================================
+# Real inzyght config — contains DB and RPC credentials. Commit
+# `inzyght.conf.example` instead, with placeholder values.
+inzyght.conf
+
+# Real Drogon runtime config — commit only a sanitized example.
+config/drogon_config.json
+config/drogon_config.json.local
+
+# Local secrets and environment overrides.
+*.local
+.env
+.env.*
+
+# ============================================================================
+# Editor / IDE / OS / tooling
+# ============================================================================
+.vscode/
+.idea/
+.cache/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================================================
+# Misc
+# ============================================================================
+# Core dumps from crashes.
+core
+core.*

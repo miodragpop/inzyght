@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mempool — Inzyght Ycash Explorer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.13.6/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+    <link href="/css/style.css" rel="stylesheet">
+    <style>
+        .hash-cell { font-family: monospace; font-size: 0.8rem; }
+    </style>
+    <script src="/js/theme.js"></script>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+</head>
+<body>
+    <div id="nav-placeholder" style="position:sticky;top:0;z-index:1030"></div>
+    <script>
+        fetch('/partials/header.html').then(r => r.text()).then(html => {
+            document.getElementById('nav-placeholder').innerHTML = html;
+            const _p = window.location.pathname;
+            document.querySelectorAll('#main-nav .nav-link').forEach(function(a) {
+                const _h = a.getAttribute('href');
+                if (_h === _p || (_h !== '/' && _p.startsWith(_h))) a.classList.add('active');
+            });
+            if (window.syncThemeButton) syncThemeButton();
+        });
+    </script>
+
+    <div class="container-fluid py-4">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <h4 class="mb-0"><i class="fa fa-clock-o text-warning"></i> Mempool</h4>
+            <span class="text-muted small"><span id="mempoolTotal">—</span> pending transactions</span>
+        </div>
+
+        <div id="emptyState" class="text-center py-5 text-muted" style="display:none">
+            <i class="fa fa-check-circle fa-3x text-success mb-3"></i>
+            <p>Mempool is empty — all transactions have been confirmed.</p>
+        </div>
+
+        <div class="card border-0 shadow-sm" id="tableCard">
+            <div class="card-body p-0">
+                <table id="mempool-table" class="table table-hover table-sm mb-0" style="width:100%">
+                    <thead class="table-light">
+                        <tr>
+                            <th>TXID</th>
+                            <th class="text-end">Fee (YEC)</th>
+                            <th class="text-end">Size (B)</th>
+                            <th class="text-end">Time in Pool</th>
+                            <th class="text-end d-none d-xl-table-cell">Depends</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/datatables.net@1.13.6/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/datatables.net-bs5@1.13.6/js/dataTables.bootstrap5.min.js"></script>
+    <script>
+    const REFRESH_MS = 10000;
+    let table = null;
+
+    function timeInPool(unixTime) {
+        const secs = Math.floor(Date.now() / 1000) - unixTime;
+        if (secs < 60)  return secs + 's';
+        if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+        return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+    }
+
+    function loadMempool() {
+        $.ajax({
+            url: '/api/v1/transactions/mempool',
+            method: 'GET',
+            dataType: 'json',
+            timeout: 8000,
+            success: function(resp) {
+                if (resp.status !== 'success') return;
+                const txs = resp.data || [];
+                $('#mempoolTotal').text(txs.length);
+
+                if (txs.length === 0) {
+                    $('#tableCard').hide();
+                    $('#emptyState').show();
+                    return;
+                }
+                $('#emptyState').hide();
+                $('#tableCard').show();
+
+                const rows = txs.map(tx => [
+                    `<code class="hash-cell"><a href="/transaction/${tx.txid}" class="text-decoration-none">${tx.txid}</a></code>`,
+                    (tx.fee).toFixed(8),
+                    tx.size,
+                    timeInPool(tx.time),
+                    tx.depends
+                ]);
+
+                if (table) {
+                    table.clear().rows.add(rows).draw();
+                } else {
+                    table = $('#mempool-table').DataTable({
+                        data: rows,
+                        columns: [
+                            { title: 'TXID' },
+                            { title: 'Fee (YEC)', className: 'text-end' },
+                            { title: 'Size (B)',  className: 'text-end' },
+                            { title: 'Time in Pool', className: 'text-end' },
+                            { title: 'Depends', className: 'text-end dt-head-right' }
+                        ],
+                        order: [[1, 'desc']],
+                        pageLength: 25,
+                        language: { emptyTable: 'Mempool is empty' }
+                    });
+                }
+            },
+            error: function() {
+                $('#mempoolTotal').text('—');
+            }
+        });
+    }
+
+    $(document).ready(function() {
+        loadMempool();
+        setInterval(loadMempool, REFRESH_MS);
+    });
+    </script>
+</body>
+</html>

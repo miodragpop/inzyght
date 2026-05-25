@@ -1,0 +1,219 @@
+# Inzyght Blockchain Explorer Configuration — EXAMPLE
+#
+# Copy this file to `inzyght.conf` and fill in the values marked
+# CHANGE_ME below. The real inzyght.conf is in .gitignore so credentials
+# stay local.
+#
+#   cp inzyght.conf.example inzyght.conf
+#   $EDITOR inzyght.conf
+
+# ============================================================================
+# SERVER SETTINGS
+# ============================================================================
+
+[server]
+# Server bind address (0.0.0.0 to listen on all interfaces, accessible from network)
+host = 0.0.0.0
+
+# Server port
+port = 8080
+
+# Number of worker threads
+threads = 4
+
+# Enable logging
+enable_logging = true
+
+# Log level: DEBUG, INFO, WARN, ERROR
+log_level = INFO
+
+# Log file path (relative to project root)
+log_path = ./logs
+
+# ============================================================================
+# DATABASE SETTINGS
+# ============================================================================
+
+[database]
+# Database type: sqlite, mysql, postgresql
+type = postgresql
+
+# Connection timeout in seconds
+timeout = 30
+
+# ============================================================================
+# YCASH RPC SETTINGS
+# ============================================================================
+
+[rpc]
+# RPC server host/IP — ycashd's rpcbind address
+host = 127.0.0.1
+
+# RPC server port — must match ycashd's rpcport
+port = 12345
+
+# RPC username — must match ycashd's rpcuser
+username = CHANGE_ME
+
+# RPC password — must match ycashd's rpcpassword
+password = CHANGE_ME
+
+# Request timeout in seconds
+# Heavy blocks with many transactions can need 60s+ at large batch sizes.
+timeout = 60.0
+
+# Use SSL/TLS for RPC connection
+ssl = false
+
+# Validate SSL certificate for HTTPS connections
+validate_certificate = false
+
+# ============================================================================
+# ZEROMQ EVENT SETTINGS
+# ============================================================================
+
+[zeromq]
+# Enable ZeroMQ event listener
+enabled = true
+
+# ZeroMQ endpoint — must match ycashd's zmqpubhashblock / zmqpubhashtx
+endpoint = tcp://127.0.0.1:48332
+
+# Polling fallback (if no ZeroMQ events for N seconds, fall back to polling)
+# Default: 300 seconds (5 minutes)
+polling_fallback_timeout = 300
+
+# Polling interval (seconds) when using fallback mode
+# This is how often the system fetches data from RPC when ZeroMQ events are not available
+polling_interval = 120
+
+# ============================================================================
+# CONNECTION POOL SETTINGS
+# ============================================================================
+
+[connection]
+# Connection pool size for RPC
+pool_size = 10
+
+# Connection timeout in seconds
+connection_timeout = 5.0
+
+# Number of reconnection attempts
+reconnect_attempts = 3
+
+# ============================================================================
+# API SETTINGS
+# ============================================================================
+
+[api]
+# Enable API endpoints
+enabled = true
+
+# API version prefix (e.g., /api/v1)
+version = v1
+
+# Maximum connections
+max_connections = 100
+
+# Request body size limit in bytes
+max_body_size = 1048576
+
+# Enable CORS
+enable_cors = false
+
+# ============================================================================
+# POSTGRESQL SETTINGS (used when [database] type = postgresql)
+# ============================================================================
+
+[postgresql]
+# PostgreSQL host
+host = 127.0.0.1
+
+# PostgreSQL port
+port = 5432
+
+# PostgreSQL database name
+database = inzyght
+
+# PostgreSQL username (the role you created via setup_db.sh)
+username = CHANGE_ME
+
+# PostgreSQL password
+password = CHANGE_ME
+
+# Size of the query connection pool (for HTTP-side reads).
+# COPY pool size is separate and lives in code.
+query_pool_size = 8
+
+# ============================================================================
+# INDEXER SETTINGS
+# ============================================================================
+
+[indexer]
+
+# Number of blocks to process per batch during indexing.
+# 1000 is the sweet spot for our workload (batched JSON-RPC has fixed
+# overhead per round-trip; bigger batches amortize it). Smaller values
+# reduce memory; larger values eventually hit ycashd's response size cap.
+block_batch_size = 25
+
+# Number of block headers to process per batch.
+# Default 1000. Same trade-off as block_batch_size.
+block_headers_batch_size = 1000
+
+# Maximum number of block batches queued between RPC producer and DB consumer.
+# Higher values: more memory, better producer/consumer decoupling.
+# Lower values: less memory, tighter coupling.
+# Memory impact: queue_depth * batch_size * avg_block_size.
+queue_depth = 5
+
+# ============================================================================
+# SECURITY SETTINGS
+# ============================================================================
+
+[security]
+# Enable SSL/TLS for the web server.
+# When true, set cert_file and key_file. With Drogon built from source
+# (the default for this project), HTTPS is supported natively — no
+# reverse proxy required.
+enable_ssl = false
+
+# SSL certificate file path (if enable_ssl = true)
+# cert_file = ./config/cert.pem
+
+# SSL private key file path (if enable_ssl = true)
+# key_file = ./config/key.pem
+
+# Enable rate limiting (also see [rate_limit] section below)
+enable_rate_limit = false
+
+# ============================================================================
+# SESSION SETTINGS
+# ============================================================================
+
+[session]
+# Enable sessions
+enabled = false
+
+# Session timeout in seconds
+timeout = 3600
+
+# Session storage type: memory, file, database
+storage = memory
+
+# =============================================================================
+# RATE LIMITING
+# Sliding-window per-IP rate limiter. Bots hitting address endpoints are the
+# main load concern — keep address limits strict, api limits more generous.
+# =============================================================================
+
+[rate_limit]
+
+# Address endpoints (/api/v1/addresses/*)
+# These trigger expensive RPC + DB calls — keep tight.
+address_max_requests = 20
+address_window_seconds = 60
+
+# All other API endpoints
+api_max_requests = 120
+api_window_seconds = 60

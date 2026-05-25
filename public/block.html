@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Block — Inzyght Ycash Explorer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <link href="/css/style.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+    <style>
+        .hash-word-break { word-break: break-all; font-family: monospace; }
+        .tx-card { border-left: 3px solid #198754; }
+        .tx-card.coinbase { border-left-color: #ffc107; }
+        .tx-card.shielded { border-left-color: #0d6efd; }
+        .io-row { font-size: 0.85rem; }
+        .badge-sapling { background-color: #0d6efd; }
+        .badge-sprout  { background-color: #6f42c1; }
+        .badge-coinbase { background-color: #ffc107; color: #000; }
+        .arrow-nav a { font-size: 1.1rem; }
+    </style>
+    <script src="/js/theme.js"></script>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+</head>
+<body>
+    <div id="nav-placeholder" style="position:sticky;top:0;z-index:1030"></div>
+    <script>
+        fetch('/partials/header.html').then(r => r.text()).then(html => {
+            document.getElementById('nav-placeholder').innerHTML = html;
+            const _p = window.location.pathname;
+            document.querySelectorAll('#main-nav .nav-link').forEach(function(a) {
+                const _h = a.getAttribute('href');
+                if (_h === _p || (_h !== '/' && _p.startsWith(_h))) a.classList.add('active');
+            });
+            if (window.syncThemeButton) syncThemeButton();
+            document.querySelectorAll('#main-nav .nav-link').forEach(a => {
+                if (a.getAttribute('href') === window.location.pathname) a.classList.add('active');
+            });
+        });
+    </script>
+
+    <div class="container-fluid py-4">
+
+        <!-- Loading / Error states -->
+        <div id="loading" class="text-center py-5">
+            <div class="spinner-border text-success" role="status"></div>
+            <p class="mt-2 text-muted">Loading block...</p>
+        </div>
+        <div id="error-msg" class="alert alert-danger d-none"></div>
+
+        <!-- Block header -->
+        <div id="block-content" class="d-none">
+
+            <!-- Title + prev/next nav -->
+            <div class="d-flex align-items-center justify-content-between mb-3 arrow-nav">
+                <a id="prev-block" href="#" class="text-decoration-none text-muted"><i class="fa fa-chevron-left"></i> Prev</a>
+                <h4 class="mb-0 text-center">
+                    <i class="fa fa-cube text-success"></i> Block <span id="hdr-height"></span>
+                </h4>
+                <a id="next-block" href="#" class="text-decoration-none text-muted">Next <i class="fa fa-chevron-right"></i></a>
+            </div>
+
+            <!-- Header info card -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <small class="text-muted d-block">Hash</small>
+                            <span class="hash-word-break" id="hdr-hash"></span>
+                            <button class="btn btn-sm btn-outline-secondary ms-2 py-0" onclick="copyHash()"><i class="fa fa-copy"></i></button>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Height</small>
+                            <strong id="inf-height"></strong>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Timestamp</small>
+                            <span id="inf-time"></span>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Confirmations</small>
+                            <span id="inf-confirmations"></span>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Size</small>
+                            <span id="inf-size"></span>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Difficulty</small>
+                            <span id="inf-difficulty"></span>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Bits</small>
+                            <code id="inf-bits"></code>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Version</small>
+                            <span id="inf-version"></span>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Transactions</small>
+                            <span id="inf-tx-count"></span>
+                        </div>
+                        <div class="col-12">
+                            <small class="text-muted d-block">Merkle Root</small>
+                            <code class="hash-word-break" id="inf-merkle"></code>
+                        </div>
+                        <div class="col-6">
+                            <small class="text-muted d-block">Previous Block</small>
+                            <a id="inf-prev" href="#" class="hash-word-break"></a>
+                        </div>
+                        <div class="col-6" id="next-block-row">
+                            <small class="text-muted d-block">Next Block</small>
+                            <a id="inf-next" href="#" class="hash-word-break"></a>
+                        </div>
+                        <div class="col-md-6 col-12" id="miner-row">
+                            <small class="text-muted d-block">Miner Address</small>
+                            <a id="inf-miner" href="#" class="font-monospace"></a>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Block Reward</small>
+                            <strong class="text-success" id="inf-reward"></strong>
+                        </div>
+                        <div class="col-md-3 col-6">
+                            <small class="text-muted d-block">Block Fee</small>
+                            <span id="inf-fee"></span>
+                        </div>
+                    </div>
+
+                    <!-- Value pools -->
+                    <hr class="my-3">
+                    <div class="row g-2" id="value-pools"></div>
+                </div>
+            </div>
+
+            <!-- Transactions -->
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h5 class="mb-0"><i class="fa fa-exchange text-success"></i> Transactions <span class="badge bg-secondary" id="tx-count-badge"></span></h5>
+                <button class="btn btn-sm btn-outline-secondary" id="raw-json-btn">
+                    <i class="fa fa-code"></i> Raw JSON
+                </button>
+            </div>
+            <div id="tx-list"></div>
+
+        </div>
+    </div>
+
+    <!-- Raw JSON modal -->
+    <div class="modal fade" id="rawJsonModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content bg-dark text-light">
+                <div class="modal-header border-secondary py-2">
+                    <h6 class="modal-title mb-0"><i class="fa fa-code"></i> Raw getblock JSON</h6>
+                    <div class="ms-auto d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-light" id="raw-copy-btn"><i class="fa fa-copy"></i> Copy</button>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    </div>
+                </div>
+                <div class="modal-body p-0">
+                    <div id="raw-json-loading" class="text-center py-4 text-muted">
+                        <div class="spinner-border spinner-border-sm"></div> Loading...
+                    </div>
+                    <pre class="m-0 d-none" id="raw-json-pre" style="max-height:80vh;overflow:auto;white-space:pre-wrap;word-break:break-all"><code class="language-json" id="raw-json-code"></code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+    <script src="/js/block.js"></script>
+</body>
+</html>
