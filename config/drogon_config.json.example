@@ -1,0 +1,40 @@
+{
+  "app": {
+    "name": "inzyght",
+    "document_root": "./public",
+    "static_files_cache_time": 86400,
+    "file_types": ["html","js","css","ico","png","jpg","jpeg","gif","svg","woff","woff2","ttf","eot","json","txt","mp4","webm","zip","pdf"],
+    "upload_path": "/tmp/uploads",
+    "max_connections": 1000,
+    "client_max_body_size": "1M",
+    "server_header_field": "Server: Inzyght",
+    "enable_session": false,
+    "session_timeout": 0,
+    "log": {
+      "log_path": "./logs/",
+      "logfile_base_name": "inzyght_drogon",
+      "log_level_index": 3,
+      "max_log_file_size": 104857600,
+      "enable_auto_rotating": true
+    },
+    "run_as_daemon": false,
+    "relaunch_on_error": false,
+    "use_subprocesses": false,
+    "number_of_threads": 4,
+    "reactor_number": 1,
+    "enable_unicode_escaping_in_json": true
+  },
+  "listeners": [
+    {
+      "address": "0.0.0.0",
+      "port": 8080,
+      "https": false
+    }
+  ],
+  "ssl": {
+    "cert": "",
+    "key": "",
+    "key_password": "",
+    "conf_commands": []
+  }
+}

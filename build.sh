@@ -27,7 +27,7 @@ cd build
 
 # Run CMake and make
 cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j24
+make -j"$(nproc)"
 
 cd "$SCRIPT_DIR"
 

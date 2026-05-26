@@ -55,8 +55,6 @@ BEGIN
     END IF;
 END $$;
 
-TRUNCATE TABLE addresses CASCADE;
-TRUNCATE TABLE transactions_extended CASCADE;
 -- TRUNCATE TABLE transaction_outputs CASCADE;
 -- TRUNCATE TABLE transaction_inputs CASCADE;
 TRUNCATE TABLE transactions CASCADE;
@@ -66,7 +64,6 @@ TRUNCATE TABLE transactions CASCADE;
 ALTER SEQUENCE transactions_id_seq RESTART WITH 1;
 -- ALTER SEQUENCE transaction_inputs_id_seq RESTART WITH 1;
 -- ALTER SEQUENCE transaction_outputs_id_seq RESTART WITH 1;
-ALTER SEQUENCE addresses_id_seq RESTART WITH 1;
 ALTER SEQUENCE sync_progress_id_seq RESTART WITH 1;
 ALTER SEQUENCE reorg_events_id_seq RESTART WITH 1;
 
@@ -80,10 +77,6 @@ VALUES ('headers', 0, 0, 0, 'idle'),
 SELECT 'Blocks' as table_name, COUNT(*) as row_count FROM blocks
 UNION ALL
 SELECT 'Transactions', COUNT(*) FROM transactions
-UNION ALL
-SELECT 'Transactions Extended', COUNT(*) FROM transactions_extended
-UNION ALL
-SELECT 'Addresses', COUNT(*) FROM addresses
 UNION ALL
 SELECT 'Sync Progress', COUNT(*) FROM sync_progress
 UNION ALL
