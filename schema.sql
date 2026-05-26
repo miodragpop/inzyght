@@ -164,7 +164,6 @@ $$;
 -- SEQUENCES
 -- =============================================================================
 
-CREATE SEQUENCE public.addresses_id_seq     START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
 CREATE SEQUENCE public.reorg_events_id_seq  START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
 CREATE SEQUENCE public.sync_progress_id_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
 CREATE SEQUENCE public.transactions_id_seq  START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;
@@ -172,26 +171,6 @@ CREATE SEQUENCE public.transactions_id_seq  START WITH 1 INCREMENT BY 1 NO MINVA
 -- =============================================================================
 -- TABLES
 -- =============================================================================
-
-CREATE TABLE public.addresses (
-    id              bigint NOT NULL DEFAULT nextval('public.addresses_id_seq'),
-    address         character varying(512) NOT NULL,
-    first_seen_block integer,
-    last_seen_block  integer,
-    total_received   bigint DEFAULT 0,
-    total_sent       bigint DEFAULT 0,
-    balance          bigint DEFAULT 0,
-    label            character varying(255),
-    CONSTRAINT addresses_pkey        PRIMARY KEY (id),
-    CONSTRAINT addresses_address_key UNIQUE (address)
-);
-
-COMMENT ON TABLE  public.addresses         IS 'Aggregated address data for quick lookups and rich list';
-COMMENT ON COLUMN public.addresses.balance IS 'Current address balance (updated via UTXO calculation)';
-COMMENT ON COLUMN public.addresses.label   IS 'Human-readable label for known addresses (exchanges, pools, etc)';
-
-ALTER SEQUENCE public.addresses_id_seq OWNED BY public.addresses.id;
-
 
 CREATE TABLE public.blocks (
     height              integer NOT NULL,
@@ -284,23 +263,6 @@ COMMENT ON COLUMN public.transactions.estimated_size          IS 'Estimated tran
 ALTER SEQUENCE public.transactions_id_seq OWNED BY public.transactions.id;
 
 
-CREATE TABLE public.transactions_extended (
-    id                   bigint  NOT NULL,
-    input_count          integer DEFAULT 0,
-    output_count         integer DEFAULT 0,
-    total_input          bigint  DEFAULT 0,
-    total_output         bigint  DEFAULT 0,
-    fee                  bigint  DEFAULT 0,
-    tx_size              integer,
-    tx_version           integer,
-    locktime             bigint  DEFAULT 0,
-    shielded_spend_count  integer DEFAULT 0,
-    shielded_output_count integer DEFAULT 0,
-    joinsplit_count      integer DEFAULT 0,
-    value_balance        bigint  DEFAULT 0,
-    CONSTRAINT transactions_extended_pkey PRIMARY KEY (id)
-);
-
 -- =============================================================================
 -- VIEWS
 -- =============================================================================
@@ -330,8 +292,6 @@ COMMENT ON VIEW public.reorg_status IS 'Current chain reorganization status and 
 -- INDEXES
 -- =============================================================================
 
-CREATE INDEX idx_address_addr     ON public.addresses    USING btree (address);
-CREATE INDEX idx_address_balance  ON public.addresses    USING btree (balance DESC) WHERE balance > 0;
 CREATE INDEX idx_blocks_hash      ON public.blocks       USING btree (hash);
 CREATE INDEX idx_reorg_detected_at ON public.reorg_events USING btree (detected_at DESC);
 CREATE INDEX idx_reorg_height     ON public.reorg_events USING btree (reorg_height DESC);
