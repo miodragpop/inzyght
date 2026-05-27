@@ -186,35 +186,3 @@ void NetworkController::get_version(const HttpRequestPtr& /*req*/, std::function
 }
 
 
-void NetworkController::get_state(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const
-{
-    glz::generic response {};
-    std::string resp_body {};
-
-    try
-    {
-        // Get current state from memory (blocks, transactions, network info)
-        // This is updated in real-time by ZeroMQ events, no RPC calls needed!
-        glz::generic state = BlockchainState::instance().get_current_proxy_state();
-
-        response["status"] = "success";
-        response["data"] = state;
-
-        auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
-        auto ec = glz::write_json(response, resp_body);
-        resp->setBody(resp_body);
-        callback(resp);
-
-    }
-    catch (const std::exception& e)
-    {
-        Logger& logger = Logger::instance();
-        logger.errorf("Exception in get_state: {}", e.what());
-        response["status"] = "error";
-        response["message"] = "Server error";
-        auto resp = HttpResponse::newHttpResponse(drogon::k500InternalServerError, drogon::CT_APPLICATION_JSON);
-        auto ec = glz::write_json(response, resp_body);
-        resp->setBody(resp_body);
-        callback(resp);
-    }
-}

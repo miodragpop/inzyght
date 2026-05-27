@@ -132,6 +132,25 @@ bool ZeroMQListener::pop_event(Event& event) {
     return true;
 }
 
+void ZeroMQListener::inject_event(const std::string& type, const std::string& data) {
+    Event event;
+    event.type = type;
+    event.data = data;
+    event.timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+    {
+        std::scoped_lock<std::mutex> lock(zmq_queue_mutex);
+        event_queue.push(event);
+        if (event_queue.size() > 1000) {
+            event_queue.pop();
+        }
+    }
+    if (type == "block") {
+        block_event_received = true;
+        block_event_cv.notify_all();
+    }
+}
+
 void ZeroMQListener::reset_inactivity_timer() {
     last_event_time_ = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::high_resolution_clock::now().time_since_epoch()).count();

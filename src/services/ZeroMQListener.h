@@ -31,6 +31,11 @@ public:
     // Get next event from queue (non-blocking)
     bool pop_event(Event& event);
 
+    // Inject a synthesized event (used by PollingFallback to feed EventProcessor
+    // through the same path ZMQ uses). Does NOT reset the inactivity timer, so
+    // fallback mode stays sticky until real ZMQ traffic resumes.
+    void inject_event(const std::string& type, const std::string& data);
+
     // Check if listener is running
     bool is_running() const { return running; }
 
