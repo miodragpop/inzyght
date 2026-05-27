@@ -54,6 +54,10 @@ config/drogon_config.json.local
 .env
 .env.*
 
+# Local install/setup notes — historically contained server hostnames,
+# usernames, and reverse-proxy paths. Keep out of git.
+dependencies.txt
+
 # ============================================================================
 # Editor / IDE / OS / tooling
 # ============================================================================
