@@ -101,12 +101,12 @@ message(STATUS "ZeroMQ 4.3.5 fetched and configured for static build")
 # ============================================================================
 FetchContent_Declare(glaze
     GIT_REPOSITORY https://github.com/stephenberry/glaze.git
-    GIT_TAG v7.0.2  # Latest stable version
+    GIT_TAG v7.7.0  # Latest stable version
     GIT_SHALLOW TRUE
 )
 
 FetchContent_MakeAvailable(glaze)
-message(STATUS "glaze v7.0.2 fetched (header-only)")
+message(STATUS "glaze v7.7.0 fetched (header-only)")
 
 # ============================================================================
 # FETCHCONTENT - DROGON (Static Build with OpenSSL + PostgreSQL)
