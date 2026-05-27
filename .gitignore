@@ -57,6 +57,7 @@ config/drogon_config.json.local
 # Local install/setup notes — historically contained server hostnames,
 # usernames, and reverse-proxy paths. Keep out of git.
 dependencies.txt
+https_as_non_root.txt
 
 # ============================================================================
 # Editor / IDE / OS / tooling
