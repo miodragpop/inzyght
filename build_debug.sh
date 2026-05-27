@@ -25,8 +25,10 @@ echo "Building Inzyght (Debug)..."
 mkdir -p build_debug
 cd build_debug
 
-# Run CMake with debug configuration and make
-cmake -DCMAKE_BUILD_TYPE=Debug ..
+# Run CMake with debug configuration and make. FETCHCONTENT_QUIET=OFF
+# surfaces git clone progress for each dep so a clean build isn't a
+# silent ~minute pause.
+cmake -DCMAKE_BUILD_TYPE=Debug -DFETCHCONTENT_QUIET=OFF ..
 make -j"$(nproc)"
 
 cd "$SCRIPT_DIR"

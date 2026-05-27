@@ -25,8 +25,10 @@ echo "Building Inzyght..."
 mkdir -p build
 cd build
 
-# Run CMake and make
-cmake -DCMAKE_BUILD_TYPE=Release ..
+# Run CMake and make. FETCHCONTENT_QUIET=OFF surfaces git clone progress
+# for each dep (curl, zeromq, glaze, drogon) so a clean build isn't a
+# silent ~minute pause.
+cmake -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_QUIET=OFF ..
 make -j"$(nproc)"
 
 cd "$SCRIPT_DIR"
