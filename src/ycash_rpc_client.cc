@@ -298,8 +298,10 @@ std::string YcashRpcClient::perform_rpc_http(const std::string& method,
     return response_body;
 }
 
-// Extract the raw substring that is the value of the "result" key in a JSON-RPC envelope,
-// without reparsing through a map-based structure (which would reorder keys alphabetically).
+// Extracts the "result" value as a raw JSON substring, avoiding a full
+// parse/re-serialize round-trip through glz::generic. Used for endpoints
+// that forward raw ycashd JSON to the frontend (block/tx modals), where
+// preserving the original field order matters for display.
 std::string YcashRpcClient::extract_result_raw(const std::string& rpc_envelope)
 {
     auto key_pos = rpc_envelope.find("\"result\"");
