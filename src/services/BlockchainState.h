@@ -22,14 +22,6 @@ class BlockchainState
         size_t get_mempool_count() const;
         std::vector<PeerInfoResponse> get_cached_peers() const;
 
-        void add_block(const glz::generic& block);
-        void add_transaction(const glz::generic& tx);
-
-        glz::generic get_latest_blocks(int limit = 20) const;
-        glz::generic get_latest_transactions(int limit = 20) const;
-
-        glz::generic get_current_proxy_state() const;
-
         void update_state_on_block_event();
         void update_state_on_transaction_event();
 
@@ -46,9 +38,4 @@ class BlockchainState
         std::map<std::string, MempoolTransactionInfo> cached_raw_mempool_response {};
 
         glz::generic proxy_network_info;
-        std::vector<glz::generic> proxy_latest_blocks;
-        std::vector<glz::generic> proxy_latest_transactions;
-
-        static const int MAX_BLOCKS = 100;
-        static const int MAX_TRANSACTIONS = 100;
 };
