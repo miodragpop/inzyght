@@ -35,17 +35,38 @@ function getTxid() {
     return parts[parts.length - 1];
 }
 
+// Blockhash carried over when navigating from an orphaned block, so the API
+// can locate an off-chain tx (e.g. an orphaned coinbase).
+function getBlockHashParam() {
+    return new URLSearchParams(window.location.search).get('blockhash') || '';
+}
+
+function showOrphanNotice(detail) {
+    $('#loading').addClass('d-none');
+    $('#orphan-notice-detail').text(detail || '');
+    $('#orphan-notice').removeClass('d-none');
+}
+
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 
 function fetchTransaction(txid) {
+    const blockhash = getBlockHashParam();
+    let url = API_BASE + '/transactions/verbose/' + txid;
+    if (blockhash) url += '?blockhash=' + encodeURIComponent(blockhash);
+
     $.ajax({
-        url: API_BASE + '/transactions/verbose/' + txid,
+        url: url,
         method: 'GET', dataType: 'json', timeout: 15000,
         success: function(r) {
             if (r.status === 'success') renderTransaction(r.data);
+            else if (r.off_chain) showOrphanNotice('It was orphaned by a chain reorganization and is no longer available for display.');
             else showError('Transaction not found.');
         },
-        error: function() { showError('Transaction not found.'); }
+        error: function(xhr) {
+            const r = xhr.responseJSON;
+            if (r && r.off_chain) showOrphanNotice('It was orphaned by a chain reorganization and is no longer available for display.');
+            else showError('Transaction not found.');
+        }
     });
 }
 
@@ -53,6 +74,15 @@ function fetchTransaction(txid) {
 
 function renderTransaction(tx) {
     document.title = truncateHash(tx.txid, 16) + ' — Inzyght';
+
+    // Node returned the tx but it's not on the active chain (orphaned). Show
+    // the notice and still render the available data below.
+    const isOffChain = tx.off_chain || tx.confirmations < 0 || tx.height < 0;
+    if (isOffChain) {
+        showOrphanNotice('The node still has this transaction, but it belongs to an orphaned block. Its data is shown below for reference only — it is not confirmed.');
+    } else {
+        $('#orphan-notice').addClass('d-none');
+    }
 
     const isCoinbase = tx.vin && tx.vin.length > 0 && tx.vin[0].coinbase !== undefined && tx.vin[0].coinbase !== '';
     const saplingSpends  = tx.sapling_spends  || 0;
@@ -72,10 +102,19 @@ function renderTransaction(tx) {
     }
     if (!isMempool) $('#mempool-row').addClass('d-none');
 
-    // Header fields
-    if (tx.height) $('#inf-height').html(`<a href="/block/${tx.height}">${formatNumber(tx.height)}</a>`);
+    // Header fields. For an off-chain tx the node reports height = -1, which is
+    // not a real main-chain height - show a dash instead of linking to /block/-1.
+    if (isOffChain) {
+        $('#inf-height').text('—');
+    } else if (tx.height) {
+        $('#inf-height').html(`<a href="/block/${tx.height}">${formatNumber(tx.height)}</a>`);
+    }
     if (tx.blocktime) $('#inf-time').text(formatTimestamp(tx.blocktime));
-    $('#inf-confirmations').text(tx.confirmations ? formatNumber(tx.confirmations) : '0 (mempool)');
+    if (isOffChain) {
+        $('#inf-confirmations').html('<span class="badge bg-warning text-dark">Orphaned (-1)</span>');
+    } else {
+        $('#inf-confirmations').text(tx.confirmations ? formatNumber(tx.confirmations) : '0 (mempool)');
+    }
     if (tx.size) $('#inf-size').text(formatNumber(tx.size) + ' B');
     $('#inf-version').text(tx.version);
     if (tx.expiry_height) $('#inf-expiry').text(formatNumber(tx.expiry_height));

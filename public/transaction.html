@@ -43,6 +43,15 @@
         </div>
         <div id="error-msg" class="alert alert-danger d-none"></div>
 
+        <!-- Off-chain (orphaned) tx notice. Shown when the tx is not on the main
+             chain: either the node still has it with confirmations = -1, or it
+             was removed by a reorg rollback and can no longer be displayed. -->
+        <div id="orphan-notice" class="alert alert-warning d-none" role="alert">
+            <i class="fa fa-triangle-exclamation me-1"></i>
+            <strong>This transaction is not on the main chain.</strong>
+            <span id="orphan-notice-detail"></span>
+        </div>
+
         <div id="tx-content" class="d-none">
 
             <!-- Title -->

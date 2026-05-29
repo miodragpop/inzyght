@@ -74,8 +74,18 @@ function fetchVerbose(hash) {
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderBlock(b) {
-    document.title = 'Block ' + b.height + ' — Inzyght';
+    const isOrphan = b.confirmations < 0;
+    document.title = (isOrphan ? 'Orphaned Block ' : 'Block ') + b.height + ' — Inzyght';
     initRawJsonModal(b.hash);
+
+    // Off-chain (orphaned) block: ycashd knows it but it's not on the active
+    // chain, so getblock reports confirmations = -1. Surface this clearly
+    // instead of rendering it like a normal confirmed block.
+    if (isOrphan) {
+        $('#orphan-notice').removeClass('d-none');
+    } else {
+        $('#orphan-notice').addClass('d-none');
+    }
 
     // Nav arrows
     if (b.height > 0) {
@@ -84,9 +94,11 @@ function renderBlock(b) {
         $('#prev-block').addClass('invisible');
     }
     if (b.next_hash) {
-        $('#next-block').attr('href', '/block/' + b.next_hash);
+        $('#next-block').attr('href', '/block/' + b.next_hash).removeClass('invisible');
     } else {
-        $('#next-block').addClass('text-muted disabled');
+        // No successor (chain tip, or an orphaned/off-chain block): the link
+        // leads nowhere, so hide it rather than leaving a dead "Next >".
+        $('#next-block').addClass('invisible');
     }
 
     // Title
@@ -96,7 +108,12 @@ function renderBlock(b) {
     $('#hdr-hash').text(b.hash);
     $('#inf-height').text(formatNumber(b.height));
     $('#inf-time').text(formatTimestamp(b.time));
-    $('#inf-confirmations').text(formatNumber(b.confirmations));
+    if (isOrphan) {
+        $('#inf-confirmations')
+            .html('<span class="badge bg-warning text-dark">Orphaned (-1)</span>');
+    } else {
+        $('#inf-confirmations').text(formatNumber(b.confirmations));
+    }
     $('#inf-size').text(formatNumber(b.size) + ' B');
     $('#inf-difficulty').text(Number(b.difficulty).toLocaleString(undefined, {maximumFractionDigits: 2}));
     $('#inf-bits').text(b.bits);
@@ -148,7 +165,9 @@ function renderBlock(b) {
     });
 
     // Transactions
-    renderTransactions(b.tx || []);
+    // For an orphaned block, pass its hash so tx links carry ?blockhash=,
+    // letting the node still resolve off-chain txs (e.g. the coinbase).
+    renderTransactions(b.tx || [], isOrphan ? b.hash : '');
 
     $('#loading').addClass('d-none');
     $('#block-content').removeClass('d-none');
@@ -161,7 +180,8 @@ function txType(tx) {
     return 'transparent';
 }
 
-function renderTransactions(txList) {
+function renderTransactions(txList, orphanBlockHash) {
+    const txQuery = orphanBlockHash ? ('?blockhash=' + orphanBlockHash) : '';
     const container = $('#tx-list');
 
     txList.forEach((tx, idx) => {
@@ -249,7 +269,7 @@ function renderTransactions(txList) {
                 <div class="card-header bg-transparent d-flex justify-content-between align-items-center py-2"
                      style="cursor:pointer" onclick="if(!event.target.closest('a')){bootstrap.Collapse.getOrCreateInstance(document.getElementById('${collapseId}')).toggle()}">
                     <span>
-                        <a href="/transaction/${tx.txid}" class="font-monospace text-decoration-none">
+                        <a href="/transaction/${tx.txid}${txQuery}" class="font-monospace text-decoration-none">
                             ${tx.txid}
                         </a>
                     </span>

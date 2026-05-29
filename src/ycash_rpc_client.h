@@ -78,7 +78,10 @@ public:
     std::vector<BlockSubsidy> batch_get_block_subsidies(const std::vector<int>& heights) const;
 
     // Transaction-related RPCs
-    RawTransaction get_raw_transaction(const std::string& tx_hash) const;
+    // block_hash, when non-empty, is passed as getrawtransaction's 3rd arg so
+    // the node can locate a tx that isn't on the active chain (e.g. the
+    // coinbase of an orphaned block), which plain getrawtransaction can't find.
+    RawTransaction get_raw_transaction(const std::string& tx_hash, const std::string& block_hash = "") const;
     std::string get_transaction_raw_json(const std::string& tx_hash) const;
 
     // Network-related RPCs

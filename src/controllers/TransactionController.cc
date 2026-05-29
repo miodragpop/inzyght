@@ -196,7 +196,7 @@ void TransactionController::get_all_transactions(const HttpRequestPtr& req, std:
 }
 
 
-void TransactionController::get_transaction_verbose(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
+void TransactionController::get_transaction_verbose(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger {Logger::instance()};
     ConfigManager& config {ConfigManager::instance()};
@@ -210,10 +210,59 @@ void TransactionController::get_transaction_verbose(const HttpRequestPtr& /*req*
         callback(resp);
     };
 
+    // Optional blockhash: when navigating from an orphaned (off-chain) block,
+    // the page passes ?blockhash= so the node can still locate a tx that plain
+    // getrawtransaction can't find on the active chain (e.g. an orphaned
+    // coinbase).
+    const std::string block_hash = req->getParameter("blockhash");
+
+    // Detect the node's off-chain signal: height = -1 and/or confirmations = -1.
+    // A mempool tx has NO height (absent) and confirmations 0, so check the
+    // optionals for a negative value rather than value_or(0) - otherwise
+    // mempool would be misflagged.
+    auto is_off_chain = [](const RawTransaction& t) {
+        return (t.confirmations.has_value() && *t.confirmations < 0) ||
+               (t.height.has_value()        && *t.height        < 0);
+    };
+
     try
     {
         YcashRpcClient client(config.get_rpc_config());
-        RawTransaction tx = client.get_raw_transaction(hash);
+
+        // Always try the main chain first. A non-coinbase tx from an orphaned
+        // block is usually re-mined into a later main-chain block under the
+        // SAME txid, so it's perfectly valid - we must not mislabel it as
+        // orphaned just because the request carried an orphan blockhash. Only
+        // fall back to the supplied blockhash if the tx isn't on the main
+        // chain (the genuine orphan case, e.g. an orphaned coinbase).
+        RawTransaction tx;
+        bool off_chain = false;
+        try
+        {
+            tx = client.get_raw_transaction(hash);
+            // An empty txid means the node didn't actually resolve it on the
+            // main chain (ycashd may return an empty object instead of an
+            // error), so treat that as "not on chain" too.
+            off_chain = tx.txid.empty() || is_off_chain(tx);
+        }
+        catch (const std::exception&)
+        {
+            off_chain = true;  // not resolvable on the active chain
+        }
+
+        if (off_chain && !block_hash.empty())
+        {
+            // Not on the main chain - resolve the orphaned copy via its block.
+            tx = client.get_raw_transaction(hash, block_hash);
+            off_chain = is_off_chain(tx);
+        }
+
+        if (tx.txid.empty())
+        {
+            // Node returned nothing usable (can happen for a tx removed by a
+            // reorg with no blockhash to fall back to).
+            throw std::runtime_error("transaction not resolvable");
+        }
 
         response["status"] = "success";
         auto& d = response["data"];
@@ -225,7 +274,8 @@ void TransactionController::get_transaction_verbose(const HttpRequestPtr& /*req*
         d["expiry_height"] = tx.expiryheight.value_or(0);
         d["overwintered"]  = tx.overwintered.value_or(false);
         d["confirmations"] = tx.confirmations.value_or(0);
-        d["blockhash"]     = tx.blockhash.value_or("");
+        d["off_chain"]     = off_chain;
+        d["blockhash"]     = tx.blockhash.value_or(block_hash);
         d["blocktime"]     = tx.blocktime.value_or(0);
         d["height"]        = tx.height.value_or(0);
         d["value_balance"] = tx.valueBalance.value_or(0.0);
@@ -256,7 +306,16 @@ void TransactionController::get_transaction_verbose(const HttpRequestPtr& /*req*
     {
         logger.warnf("get_transaction_verbose failed for {}: {}", hash, e.what());
         response["status"] = "error";
-        response["message"] = "Transaction not found";
+        // A tx removed by a reorg rollback is no longer decodable here (and the
+        // DB row is gone), so we can't distinguish "orphaned" from "never
+        // existed" by txid alone. If the request carried a blockhash, the
+        // caller already knows it came from an off-chain block - surface that.
+        if (!block_hash.empty()) {
+            response["off_chain"] = true;
+            response["message"] = "Transaction is not on the main chain";
+        } else {
+            response["message"] = "Transaction not found";
+        }
         send(drogon::k404NotFound);
     }
 }

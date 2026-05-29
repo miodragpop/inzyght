@@ -60,6 +60,15 @@
                 <a id="next-block" href="#" class="text-decoration-none text-muted">Next <i class="fa fa-chevron-right"></i></a>
             </div>
 
+            <!-- Orphaned / off-chain block notice (shown when confirmations < 0) -->
+            <div id="orphan-notice" class="alert alert-warning d-none" role="alert">
+                <i class="fa fa-triangle-exclamation me-1"></i>
+                <strong>This block is not on the main chain.</strong>
+                It is known to the node but was orphaned by a chain reorganization
+                (confirmations = -1). Its transactions are not confirmed and any
+                coinbase reward was not awarded on the active chain.
+            </div>
+
             <!-- Header info card -->
             <div class="card border-0 shadow-sm mb-4">
                 <div class="card-body">

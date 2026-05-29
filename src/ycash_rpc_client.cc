@@ -482,9 +482,14 @@ std::string YcashRpcClient::get_transaction_raw_json(const std::string& tx_hash)
     return extract_result_raw(envelope);
 }
 
-RawTransaction YcashRpcClient::get_raw_transaction(const std::string& tx_hash) const
+RawTransaction YcashRpcClient::get_raw_transaction(const std::string& tx_hash, const std::string& block_hash) const
 {
-    std::vector<glz::generic> params_vec{tx_hash, 1}; // verbose = 1 to get decoded transaction
+    // verbose = 1 to get decoded transaction. When block_hash is supplied it is
+    // passed as the 3rd arg so the node can find txs not on the active chain.
+    std::vector<glz::generic> params_vec{tx_hash, 1};
+    if (!block_hash.empty()) {
+        params_vec.emplace_back(block_hash);
+    }
     glz::generic params(params_vec);
     std::string json_response = make_json_rpc_request("getrawtransaction", params, Backend::Adhoc);
 
