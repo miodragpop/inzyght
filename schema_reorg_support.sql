@@ -306,3 +306,28 @@ COMMENT ON TABLE reorg_events IS 'Complete audit trail of all chain reorganizati
 COMMENT ON TABLE sync_progress IS 'Now includes reorg tracking for anomaly detection';
 COMMENT ON VIEW reorg_status IS 'Current chain reorganization status and health';
 COMMENT ON VIEW finalization_progress IS 'Progress of blocks reaching finalization depth';
+
+-- ==============================================================================
+-- GRANTS
+-- ==============================================================================
+-- When this migration is applied out-of-band by a privileged role (e.g. as the
+-- postgres superuser rather than as the app role via setup_postgresql.sh), the
+-- objects above end up owned by that role and the app role cannot INSERT into
+-- reorg_events (it lacks USAGE on the BIGSERIAL sequence). That surfaces at
+-- runtime as: "permission denied for sequence reorg_events_id_seq*".
+--
+-- Re-grant to the database owner (the role the app connects as in a correct
+-- setup) so re-applying this file as any role leaves the app able to use the
+-- new objects. Idempotent and safe to re-run.
+DO $$
+DECLARE
+    app_role text;
+BEGIN
+    SELECT pg_get_userbyid(datdba) INTO app_role
+    FROM pg_database WHERE datname = current_database();
+
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON reorg_events TO %I', app_role);
+    EXECUTE format('GRANT USAGE, SELECT, UPDATE ON SEQUENCE %s TO %I',
+                   pg_get_serial_sequence('reorg_events', 'id'), app_role);
+END
+$$;
