@@ -207,6 +207,16 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
             }
 
             int current_height = get_last_indexed_height();
+            if (current_height < 0)
+            {
+                // Couldn't read the indexed height (DB connection down or query
+                // failed). Do NOT treat this as genesis - that would re-index
+                // from height 0 into a populated DB and cause PK violations.
+                // Skip this cycle and retry once the DB is reachable again.
+                logger.warn("BlockIndexer: Could not read last indexed height (DB unavailable); skipping cycle");
+                if (!interruptible_sleep(stop_token, 30)) continue;
+                continue;
+            }
 
             progress_total_height = blockchain_height;
             progress_current_height = current_height;
@@ -339,17 +349,21 @@ int BlockIndexer::get_last_indexed_height()
 {
     PGconn* conn = static_cast<PGconn*>(db_connection_);
 
-    // Check connection status
+    // Return -1 (not 0) on any error: a dead connection or failed query must NOT
+    // be mistaken for "genesis / nothing indexed", which would trigger a
+    // destructive re-sync from height 0 against an already-populated database.
     if (!conn || PQstatus(conn) != CONNECTION_OK) {
-        return 0;
+        return -1;
     }
 
     PGresult* res = PQexec(conn, "SELECT last_indexed_height FROM sync_progress WHERE name = 'headers'");
 
-    int current_height = 0;
-    if (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0)
+    int current_height = -1;
+    if (res && PQresultStatus(res) == PGRES_TUPLES_OK)
     {
-        current_height = atoi(PQgetvalue(res, 0, 0));
+        // 0 rows = headers row genuinely absent (truly empty DB) -> height 0.
+        // >=1 row = use the stored height.
+        current_height = (PQntuples(res) > 0) ? atoi(PQgetvalue(res, 0, 0)) : 0;
     }
     if (res) {
         PQclear(res);
