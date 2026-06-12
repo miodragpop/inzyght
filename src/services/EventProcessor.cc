@@ -5,6 +5,7 @@
 #include "BlockIndexer.h"
 #include "RpcResponseCache.h"
 #include "Logger.h"
+#include "ycash_rpc_client.h"
 #include "glaze/json/generic.hpp"
 #include "models/RpcResponses.h"
 #include <chrono>
@@ -105,6 +106,9 @@ void EventProcessor::processor_thread_func(std::stop_token stop_token)
         // Only sleep if no events were found
         if (!has_event)
         {
+            retry_state_refresh_if_needed();
+            heartbeat_if_quiet();
+
             // No events, sleep briefly before checking again
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -124,7 +128,7 @@ void EventProcessor::process_block_event(const std::string& block_hash)
         // stale (confirmations, nextblockhash, address balances, mempool...).
         RpcResponseCache::instance().on_block_event();
 
-        BlockchainState::instance().update_state_on_block_event();
+        state_refresh_needed = !BlockchainState::instance().update_state_on_block_event();
 
         // Broadcast when at or near the tip (≤2 blocks behind covers the block currently being indexed)
         if (BlockIndexer::instance().blocks_behind() <= 2)
@@ -142,35 +146,68 @@ void EventProcessor::process_block_event(const std::string& block_hash)
             logger.debugf("Skipping block broadcast during sync ({} blocks behind): {}", BlockIndexer::instance().blocks_behind(), block_hash);
         }
 
-        // Broadcast network info from cached state (no RPC call)
-        try
-        {
-            const BlockchainState& current_state {BlockchainState::instance()};
-            InfoResponseExtended info {current_state.get_cached_info_extended()};
-
-            std::string json_str;
-            auto ec = glz::write_json(info, json_str);
-            if (!ec)
-            {
-                glz::generic info_result;
-                ec = glz::read_json(info_result, json_str);
-                if (!ec)
-                {
-                    info_result["mempool_count"] = static_cast<int64_t>(BlockchainState::instance().get_mempool_count());
-                    BlockchainState::instance().set_proxy_network_info(info_result);
-                    EventBroadcaster::instance().broadcast_network_update(info_result);
-                    logger.debug("Network info broadcasted from cache");
-                }
-            }
-        }
-        catch (const std::exception& e)
-        {
-            logger.debugf("Failed to broadcast network info: {}", e.what());
-        }
+        broadcast_network_info_from_cache();
     }
     catch (const std::exception& e)
     {
         logger.errorf("EventProcessor process_block_event error: {}", e.what());
+    }
+}
+
+void EventProcessor::broadcast_network_info_from_cache()
+{
+    Logger& logger = Logger::instance();
+    try
+    {
+        const BlockchainState& current_state {BlockchainState::instance()};
+        InfoResponseExtended info {current_state.get_cached_info_extended()};
+
+        std::string json_str;
+        auto ec = glz::write_json(info, json_str);
+        if (!ec)
+        {
+            glz::generic info_result;
+            ec = glz::read_json(info_result, json_str);
+            if (!ec)
+            {
+                info_result["mempool_count"] = static_cast<int64_t>(BlockchainState::instance().get_mempool_count());
+                BlockchainState::instance().set_proxy_network_info(info_result);
+                EventBroadcaster::instance().broadcast_network_update(info_result);
+                logger.debug("Network info broadcasted from cache");
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        logger.debugf("Failed to broadcast network info: {}", e.what());
+    }
+}
+
+void EventProcessor::broadcast_recovery_update()
+{
+    if (BlockIndexer::instance().blocks_behind() > 2)
+    {
+        return;  // indexer still catching up; its block events will broadcast
+    }
+
+    try
+    {
+        glz::generic::object_t block_data;
+        block_data["hash"] = BlockchainState::instance().get_cached_blockchain_info().bestblockhash;
+        EventBroadcaster::instance().broadcast_block_update(block_data);
+
+        // Synthetic empty txid: receivers only treat this as a "mempool may
+        // have changed, re-fetch" signal.
+        glz::generic tx_data;
+        tx_data["txid"] = "";
+        EventBroadcaster::instance().broadcast_transaction_update(tx_data);
+
+        broadcast_network_info_from_cache();
+        Logger::instance().info("EventProcessor: recovery broadcast sent to WebSocket clients");
+    }
+    catch (const std::exception& e)
+    {
+        Logger::instance().debugf("Recovery broadcast failed: {}", e.what());
     }
 }
 
@@ -190,7 +227,10 @@ void EventProcessor::process_transaction_events(const std::vector<std::string>& 
         // One mempool refresh and one cache invalidation for the whole batch
         // (the refreshed snapshot already includes every tx in the batch).
         RpcResponseCache::instance().on_transaction_event();
-        BlockchainState::instance().update_state_on_transaction_event();
+        if (!BlockchainState::instance().update_state_on_transaction_event())
+        {
+            state_refresh_needed = true;
+        }
 
         // Notify WebSocket clients per transaction; frontend will re-fetch via API
         for (const std::string& tx_hash : tx_hashes)
@@ -222,5 +262,89 @@ void EventProcessor::process_transaction_events(const std::vector<std::string>& 
     catch (const std::exception& e)
     {
         logger.errorf("EventProcessor process_transaction_events error: {}", e.what());
+    }
+}
+
+void EventProcessor::retry_state_refresh_if_needed()
+{
+    // Also covers a failed refresh at startup (main.cc), which this class
+    // never saw fail: age < 0 means no refresh has ever succeeded.
+    if (!state_refresh_needed && BlockchainState::instance().get_snapshot_age_seconds() >= 0)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_refresh_retry < kRefreshRetryInterval)
+    {
+        return;
+    }
+    last_refresh_retry = now;
+
+    Logger& logger = Logger::instance();
+    logger.info("EventProcessor: retrying BlockchainState refresh after failure");
+
+    // The chain may have advanced while ycashd was unreachable, so cached
+    // tip-dependent RPC responses from before the outage must not survive a
+    // successful recovery.
+    RpcResponseCache::instance().on_block_event();
+
+    if (BlockchainState::instance().update_state_on_block_event())
+    {
+        state_refresh_needed = false;
+        logger.info("EventProcessor: BlockchainState refresh recovered");
+        broadcast_recovery_update();
+    }
+}
+
+void EventProcessor::heartbeat_if_quiet()
+{
+    // A known failure is the retry loop's job; and age < 0 (never refreshed)
+    // is covered there too.
+    if (state_refresh_needed)
+    {
+        return;
+    }
+
+    const long age = BlockchainState::instance().get_snapshot_age_seconds();
+    if (age < kHeartbeatAfterSeconds)
+    {
+        return;
+    }
+
+    Logger& logger = Logger::instance();
+    try
+    {
+        const std::string tip = YcashRpcClient::thread_instance().get_best_block_hash().hash;
+        const std::string cached_tip =
+            BlockchainState::instance().get_cached_blockchain_info().bestblockhash;
+
+        if (tip == cached_tip)
+        {
+            // Tip unchanged and no events arrived: the chain genuinely didn't
+            // move, so the snapshot still matches reality — confirm freshness
+            // without a full refresh. (In ZMQ fallback mode the mempool can
+            // drift between tip changes; accepted limitation of polling mode.)
+            BlockchainState::instance().confirm_snapshot_fresh();
+            logger.debug("EventProcessor: heartbeat ok, snapshot confirmed fresh");
+        }
+        else
+        {
+            // Tip moved without a block event (missed ZMQ message or fallback
+            // gap) — treat it like a block event.
+            logger.infof("EventProcessor: heartbeat found new tip {} (missed block event?), refreshing", tip);
+            RpcResponseCache::instance().on_block_event();
+            state_refresh_needed = !BlockchainState::instance().update_state_on_block_event();
+            if (!state_refresh_needed)
+            {
+                broadcast_recovery_update();
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        logger.warnf("EventProcessor: heartbeat probe failed: {}", e.what());
+        BlockchainState::instance().mark_node_unreachable();
+        state_refresh_needed = true;  // hand recovery to the retry loop
     }
 }

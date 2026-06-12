@@ -109,7 +109,44 @@ std::vector<PeerInfoResponse> BlockchainState::get_cached_peers() const
     return cached_peer_info_response;
 }
 
-void BlockchainState::update_state_on_block_event()
+long BlockchainState::get_snapshot_age_seconds() const
+{
+    std::scoped_lock<std::mutex> lock(state_mutex);
+    if (last_successful_refresh == std::chrono::steady_clock::time_point{})
+    {
+        return -1;
+    }
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - last_successful_refresh).count();
+}
+
+bool BlockchainState::is_snapshot_stale() const
+{
+    {
+        std::scoped_lock<std::mutex> lock(state_mutex);
+        if (last_refresh_failed)
+        {
+            return true;
+        }
+    }
+    const long age = get_snapshot_age_seconds();
+    return age < 0 || age > kStaleAfterSeconds;
+}
+
+void BlockchainState::confirm_snapshot_fresh()
+{
+    std::scoped_lock<std::mutex> lock(state_mutex);
+    last_successful_refresh = std::chrono::steady_clock::now();
+    last_refresh_failed = false;
+}
+
+void BlockchainState::mark_node_unreachable()
+{
+    std::scoped_lock<std::mutex> lock(state_mutex);
+    last_refresh_failed = true;
+}
+
+bool BlockchainState::update_state_on_block_event()
 {
     Logger& logger = Logger::instance();
     YcashRpcClient& rpc_client = YcashRpcClient::instance();
@@ -132,7 +169,8 @@ void BlockchainState::update_state_on_block_event()
     if (multi_response.empty())
     {
         logger.error("BlockchainState: empty response from multi-RPC; cache not updated (ycashd unreachable?)");
-        return;
+        mark_node_unreachable();
+        return false;
     }
 
     std::vector<JsonRpcResponse<glz::raw_json>> responses;
@@ -141,13 +179,15 @@ void BlockchainState::update_state_on_block_event()
     {
         logger.errorf("BlockchainState: failed to parse multi-RPC envelope: {}",
                       glz::format_error(envelope_ec, multi_response));
-        return;
+        mark_node_unreachable();
+        return false;
     }
     if (responses.size() != kMethodNames.size())
     {
         logger.errorf("BlockchainState: multi-RPC returned {} responses, expected {}",
                       responses.size(), kMethodNames.size());
-        return;
+        mark_node_unreachable();
+        return false;
     }
 
     // Each response must have a "result" — if "error" is set instead, the inner
@@ -191,20 +231,28 @@ void BlockchainState::update_state_on_block_event()
         // leave the cache.
         cached_raw_mempool_response.clear();
         parse_one(4, kMethodNames[4], cached_raw_mempool_response);
+
+        // Advance the freshness timestamp only on a complete refresh; a
+        // partial one means some snapshot parts are still the old ones.
+        if (failed == 0)
+        {
+            last_successful_refresh = std::chrono::steady_clock::now();
+        }
+        last_refresh_failed = (failed != 0);
     }
 
     if (failed > 0)
     {
         logger.warnf("BlockchainState: cache partially refreshed — {} ok, {} failed", parsed, failed);
+        return false;
     }
-    else
-    {
-        logger.debugf("BlockchainState: cache refreshed ({} responses)", parsed);
-    }
+
+    logger.debugf("BlockchainState: cache refreshed ({} responses)", parsed);
+    return true;
 }
 
 
-void BlockchainState::update_state_on_transaction_event()
+bool BlockchainState::update_state_on_transaction_event()
 {
     YcashRpcClient& rpc_client = YcashRpcClient::instance();
     std::string response_str = rpc_client.make_json_rpc_request("getrawmempool", {true}, YcashRpcClient::Backend::State);
@@ -214,11 +262,17 @@ void BlockchainState::update_state_on_transaction_event()
     if (ec)
     {
         Logger::instance().errorf("Error reading JSON response in update_state_on_transaction_event: {}", ec.custom_error_message);
-        return;
+        mark_node_unreachable();
+        return false;
     }
 
     {
         std::scoped_lock<std::mutex> lock(state_mutex);
         cached_raw_mempool_response.swap(response);
+        // A successful mempool fetch proves the node is responsive and the
+        // most volatile part of the snapshot is current.
+        last_successful_refresh = std::chrono::steady_clock::now();
+        last_refresh_failed = false;
     }
+    return true;
 }

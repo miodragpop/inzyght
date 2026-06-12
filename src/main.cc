@@ -168,8 +168,12 @@ int main(int argc, char* argv[]) {
 
         // Populate blockchain state cache before any ZeroMQ events arrive
         logger.info("Populating initial blockchain state cache...");
-        BlockchainState::instance().update_state_on_block_event();
-        logger.info("Initial blockchain state cache populated");
+        if (BlockchainState::instance().update_state_on_block_event()) {
+            logger.info("Initial blockchain state cache populated");
+        } else {
+            // Not fatal: EventProcessor retries until ycashd answers.
+            logger.warn("Initial blockchain state refresh failed (ycashd unreachable?); will retry in background");
+        }
 
         // Get singleton references early
         ZeroMQListener& zmq_listener = ZeroMQListener::instance();

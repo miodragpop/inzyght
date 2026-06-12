@@ -57,6 +57,10 @@ void NetworkController::get_network_info(const HttpRequestPtr& req, std::functio
     response["data"]["sapling_supply"] = info["sapling_supply"];
     response["data"]["networksolps"] = info["networksolps"];
     response["data"]["mempool_count"] = static_cast<int64_t>(current_state.get_mempool_count());
+    // Snapshot freshness — lets the frontend flag data as frozen when ycashd
+    // stops answering RPC (the cache keeps the last good snapshot).
+    response["data"]["as_of_age_seconds"] = glz::generic_i64(current_state.get_snapshot_age_seconds());
+    response["data"]["stale"] = current_state.is_snapshot_stale();
 
     auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
     auto ec = glz::write_json(response, resp_body);
@@ -154,6 +158,10 @@ void NetworkController::get_peers(const HttpRequestPtr& req, std::function<void(
 
         response["status"] = "success";
         response["data"]   = peer_list;
+        // Snapshot freshness, same semantics as /network/info: the peer list
+        // is frozen at its last successful refresh when ycashd is unreachable.
+        response["as_of_age_seconds"] = glz::generic_i64(BlockchainState::instance().get_snapshot_age_seconds());
+        response["stale"] = BlockchainState::instance().is_snapshot_stale();
 
         auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
         resp_body = glz::write_json(response).value_or("error");

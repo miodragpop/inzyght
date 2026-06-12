@@ -431,6 +431,11 @@ void TransactionController::get_mempool(const HttpRequestPtr& /*req*/, std::func
     response["status"] = "success";
     response["data"]   = std::move(items);
     response["count"]  = static_cast<int64_t>(mempool.size());
+    // Freshness of the underlying snapshot: when ycashd stops answering RPC
+    // the snapshot is kept (not pruned), so surface its age instead of
+    // presenting frozen data as live.
+    response["as_of_age_seconds"] = glz::generic_i64(BlockchainState::instance().get_snapshot_age_seconds());
+    response["stale"]  = BlockchainState::instance().is_snapshot_stale();
 
     glz::write_json(response, response_str);
     auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
