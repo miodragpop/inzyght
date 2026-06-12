@@ -3,6 +3,7 @@
 #include "EventBroadcaster.h"
 #include "BlockchainState.h"
 #include "BlockIndexer.h"
+#include "RpcResponseCache.h"
 #include "Logger.h"
 #include "glaze/json/generic.hpp"
 #include "models/RpcResponses.h"
@@ -68,6 +69,11 @@ void EventProcessor::processor_thread_func(std::stop_token stop_token)
         ZeroMQListener::Event event;
         bool has_event = false;
 
+        // Transaction events are coalesced: each one would otherwise trigger
+        // a full verbose getrawmempool, so during a tx burst we drain the
+        // queue first and refresh the mempool snapshot once for the batch.
+        std::vector<std::string> tx_batch;
+
         // Process all available events in queue without waiting
         // Note: Individual event handlers will skip expensive RPC calls during sync
         while (ZeroMQListener::instance().pop_event(event))
@@ -81,14 +87,19 @@ void EventProcessor::processor_thread_func(std::stop_token stop_token)
             }
             else if (event.type == "transaction")
             {
-                logger.debugf("Processing transaction event: hash={}", event.data);
-                process_transaction_event(event.data);
+                logger.debugf("Queueing transaction event: hash={}", event.data);
+                tx_batch.push_back(event.data);
             }
             else
             {
                 // Log unknown events with full details
                 logger.warnf("Received unknown ZeroMQ event type '{}' with data: {} (data_length: {} hex chars / {} bytes)", event.type, event.data, event.data.length(), event.data.length() / 2);
             }
+        }
+
+        if (!tx_batch.empty())
+        {
+            process_transaction_events(tx_batch);
         }
 
         // Only sleep if no events were found
@@ -109,6 +120,10 @@ void EventProcessor::process_block_event(const std::string& block_hash)
 
     try
     {
+        // New tip: everything tip-dependent in the RPC response cache is now
+        // stale (confirmations, nextblockhash, address balances, mempool...).
+        RpcResponseCache::instance().on_block_event();
+
         BlockchainState::instance().update_state_on_block_event();
 
         // Broadcast when at or near the tip (≤2 blocks behind covers the block currently being indexed)
@@ -159,27 +174,33 @@ void EventProcessor::process_block_event(const std::string& block_hash)
     }
 }
 
-void EventProcessor::process_transaction_event(const std::string& tx_hash)
+void EventProcessor::process_transaction_events(const std::vector<std::string>& tx_hashes)
 {
     Logger& logger = Logger::instance();
     auto start_time = std::chrono::high_resolution_clock::now();
 
     if (BlockIndexer::instance().is_syncing())
     {
-        logger.debugf("Skipping transaction broadcast during sync: {}", tx_hash);
+        logger.debugf("Skipping transaction broadcast during sync ({} events)", tx_hashes.size());
         return;
     }
 
     try
     {
+        // One mempool refresh and one cache invalidation for the whole batch
+        // (the refreshed snapshot already includes every tx in the batch).
+        RpcResponseCache::instance().on_transaction_event();
         BlockchainState::instance().update_state_on_transaction_event();
 
-        // Notify WebSocket clients that a new transaction arrived; frontend will re-fetch via API
-        glz::generic tx_data;
-        tx_data["txid"] = tx_hash;
-        EventBroadcaster::instance().broadcast_transaction_update(tx_data);
+        // Notify WebSocket clients per transaction; frontend will re-fetch via API
+        for (const std::string& tx_hash : tx_hashes)
+        {
+            glz::generic tx_data;
+            tx_data["txid"] = tx_hash;
+            EventBroadcaster::instance().broadcast_transaction_update(tx_data);
+        }
 
-        // Update mempool count in cached network info and broadcast
+        // Update mempool count in cached network info and broadcast (once per batch)
         try
         {
             glz::generic net_info = BlockchainState::instance().get_proxy_network_info();
@@ -196,10 +217,10 @@ void EventProcessor::process_transaction_event(const std::string& tx_hash)
         }
 
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count();
-        logger.infof("Transaction event broadcasted: {} (took {}ms)", tx_hash, elapsed);
+        logger.infof("{} transaction event(s) broadcasted (took {}ms)", tx_hashes.size(), elapsed);
     }
     catch (const std::exception& e)
     {
-        logger.errorf("EventProcessor process_transaction_event error: {}", e.what());
+        logger.errorf("EventProcessor process_transaction_events error: {}", e.what());
     }
 }

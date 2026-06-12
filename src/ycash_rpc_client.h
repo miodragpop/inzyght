@@ -61,6 +61,13 @@ public:
     static YcashRpcClient& instance();
     static bool initialize(const RpcConfig::Config& config);
 
+    // Per-thread client for HTTP request handlers (and other side threads).
+    // curl easy handles are not thread-safe and the singleton's handles are
+    // owned by the indexer/state threads, so each thread gets its own client
+    // with its own persistent ycashd connection. Requires initialize() to
+    // have been called first (done at startup, before Drogon spawns threads).
+    static YcashRpcClient& thread_instance();
+
     ~YcashRpcClient();
 
 
@@ -71,6 +78,7 @@ public:
     std::string get_block_raw_json(const std::string& hash) const;
     BlockCountResponse get_block_count() const;
     BlockHashResponse get_block_hash(int height) const;
+    BlockHashResponse get_best_block_hash() const;
 
     // Batch get block headers and coinbase transactions
     std::vector<YcashBlock> batch_get_block_headers(const std::vector<int>& heights, int verbosity = 1) const;

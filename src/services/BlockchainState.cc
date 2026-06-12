@@ -81,6 +81,8 @@ std::vector<std::string> BlockchainState::get_cached_mempool() const
 {
     std::vector<std::string> mempool_txes {};
 
+    std::scoped_lock<std::mutex> lock(state_mutex);
+    mempool_txes.reserve(cached_raw_mempool_response.size());
     for (const auto& mempool_entry : cached_raw_mempool_response)
     {
         mempool_txes.emplace_back(mempool_entry.first);

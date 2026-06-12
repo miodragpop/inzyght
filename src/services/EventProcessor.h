@@ -2,6 +2,8 @@
 
 #include <thread>
 #include <atomic>
+#include <string>
+#include <vector>
 #include "RpcConfig.h"
 
 class EventProcessor
@@ -19,7 +21,9 @@ class EventProcessor
 
         void processor_thread_func(std::stop_token stop_token);
         void process_block_event(const std::string& block_hash);
-        void process_transaction_event(const std::string& tx_hash);
+        // Handles a whole drained batch of transaction events with a single
+        // mempool refresh (see processor_thread_func for why they're batched).
+        void process_transaction_events(const std::vector<std::string>& tx_hashes);
 
         RpcConfig::Config config;
         std::jthread processor_thread;

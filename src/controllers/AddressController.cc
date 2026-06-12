@@ -1,6 +1,5 @@
 #include "AddressController.h"
 #include "ycash_rpc_client.h"
-#include "ConfigManager.h"
 #include "RpcConfig.h"
 #include "Logger.h"
 #include "services/BlockchainState.h"
@@ -25,7 +24,6 @@ static constexpr int MAX_CHUNKS    = 6;     // max RPC calls per request (≈ 26
 void AddressController::get_address_info(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& address) const
 {
     Logger& logger {Logger::instance()};
-    ConfigManager& config {ConfigManager::instance()};
     glz::generic::object_t response {};
     std::string resp_body {};
 
@@ -38,7 +36,7 @@ void AddressController::get_address_info(const HttpRequestPtr& req, std::functio
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
 
         // ── Parse offset_height query param ───────────────────────────────────
         // First call: no param → use chain tip.
@@ -243,9 +241,8 @@ void AddressController::get_address_transactions(const HttpRequestPtr& req, std:
     try
     {
         Logger& logger = Logger::instance();
-        ConfigManager& config = ConfigManager::instance();
 
-        YcashRpcClient client(config.get_rpc_config());
+        [[maybe_unused]] YcashRpcClient& client = YcashRpcClient::thread_instance();
 
         try
         {

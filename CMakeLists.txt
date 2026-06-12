@@ -221,6 +221,7 @@ set(SOURCES
     src/services/ZeroMQListener.cc
     src/services/EventBroadcaster.cc
     src/services/BlockchainState.cc
+    src/services/RpcResponseCache.cc
     src/services/EventProcessor.cc
     src/services/PollingFallback.cc
     src/services/BlockIndexer.cc

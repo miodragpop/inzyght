@@ -1,10 +1,54 @@
 #include "ycash_rpc_client.h"
 #include "Logger.h"
+#include "services/RpcResponseCache.h"
 #include <cstddef>
 #include <format>
+#include <optional>
 #include <curl/curl.h>
 #include "glaze/glaze.hpp" // IWYU pragma: keep
 #include "models/RpcResponses.h"
+
+
+namespace {
+
+// Which methods may be served from RpcResponseCache, and under which
+// invalidation class. Anything not listed here always goes to the node:
+// getblockcount/getbestblockhash are freshness probes, and the periodic
+// state snapshot (getblockchaininfo, getrawmempool, ...) is already cached
+// in BlockchainState.
+std::optional<RpcResponseCache::Class> cacheable_class(const std::string& method)
+{
+    using Class = RpcResponseCache::Class;
+
+    // Pure function of height — the answer can never change.
+    if (method == "getblocksubsidy")
+        return Class::Immutable;
+
+    // These answers (including their confirmations / nextblockhash fields)
+    // only change when a new block arrives.
+    if (method == "getblock" || method == "getblockhash" ||
+        method == "getrawtransaction" || method == "getaddressbalance" ||
+        method == "getaddressdeltas" || method == "getaddressfirstlastheight")
+        return Class::BlockDependent;
+
+    // Per-address mempool view changes with every mempool update.
+    if (method == "getaddressmempool")
+        return Class::MempoolDependent;
+
+    return std::nullopt;
+}
+
+// Cache key = method + serialized params. Empty on serialization failure,
+// which callers treat as "don't cache".
+std::string make_rpc_cache_key(const std::string& method, const glz::generic& params)
+{
+    std::string params_json;
+    if (glz::write_json(params, params_json))
+        return "";
+    return method + "|" + params_json;
+}
+
+} // namespace
 
 
 // CURL callback for writing response to std::string
@@ -80,6 +124,11 @@ YcashRpcClient& YcashRpcClient::instance() {
         client_instance = std::make_unique<YcashRpcClient>();
     }
     return *client_instance;
+}
+
+YcashRpcClient& YcashRpcClient::thread_instance() {
+    thread_local YcashRpcClient client(instance().rpc_config);
+    return client;
 }
 
 // Get curl handle for the specified backend
@@ -363,6 +412,21 @@ std::string YcashRpcClient::extract_result_raw(const std::string& rpc_envelope)
 std::string YcashRpcClient::make_json_rpc_request(const std::string& method,
                                                    const glz::generic& params,
                                                    Backend backend) const {
+    // Serve repeat lookups (same method + params) from the event-invalidated
+    // cache: between two blocks these answers are byte-identical, so this
+    // skips the node round-trip entirely.
+    const auto cache_class = cacheable_class(method);
+    std::string cache_key;
+    if (cache_class) {
+        cache_key = make_rpc_cache_key(method, params);
+        if (!cache_key.empty()) {
+            if (auto cached = RpcResponseCache::instance().get(cache_key)) {
+                Logger::instance().debugf("RPC method: {} served from cache", method);
+                return *cached;
+            }
+        }
+    }
+
     try {
         std::string response_body = perform_rpc_http(method, params, backend);
 
@@ -395,6 +459,11 @@ std::string YcashRpcClient::make_json_rpc_request(const std::string& method,
                 logger.errorf("Failed to serialize RPC result: {}", glz::format_error(result_ec));
                 return R"({"error":"Failed to serialize RPC result"})";
             }
+            // Only successful responses are cached — error returns above fall
+            // through uncached so transient failures aren't pinned.
+            if (cache_class && !cache_key.empty()) {
+                RpcResponseCache::instance().put(cache_key, result_json, *cache_class);
+            }
             return result_json;
         }
 
@@ -425,9 +494,18 @@ YcashBlock YcashRpcClient::get_block_by_hash(const std::string& hash, int verbos
 
 std::string YcashRpcClient::get_block_raw_json(const std::string& hash) const
 {
+    // "raw|" prefix keeps these order-preserving results separate from the
+    // re-serialized ones make_json_rpc_request caches for the same params.
+    const std::string cache_key = "raw|getblock|" + hash;
+    if (auto cached = RpcResponseCache::instance().get(cache_key))
+        return *cached;
+
     std::vector<glz::generic> params_vec{glz::generic(hash), glz::generic(2)};
     std::string envelope = perform_rpc_http("getblock", glz::generic(params_vec), Backend::Main);
-    return extract_result_raw(envelope);
+    std::string result = extract_result_raw(envelope);
+    if (!result.empty())
+        RpcResponseCache::instance().put(cache_key, result, RpcResponseCache::Class::BlockDependent);
+    return result;
 }
 
 YcashBlockVerbose YcashRpcClient::get_block_verbose_by_hash(const std::string& hash) const
@@ -460,6 +538,21 @@ BlockCountResponse YcashRpcClient::get_block_count() const
     return response;
 }
 
+BlockHashResponse YcashRpcClient::get_best_block_hash() const
+{
+    // Freshness probe (PollingFallback tip detection) — deliberately not in
+    // the cacheable set, so this always hits the node.
+    std::string json_response = make_json_rpc_request("getbestblockhash", glz::generic::array_t {}, Backend::Adhoc);
+
+    BlockHashResponse response;
+    std::string wrapped = std::string("{\"hash\":") + json_response + "}";
+    auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(response, wrapped);
+    if (ec) {
+        throw std::runtime_error(std::format("Failed to parse best block hash: {}", glz::format_error(ec, wrapped)));
+    }
+    return response;
+}
+
 BlockHashResponse YcashRpcClient::get_block_hash(int height) const
 {
     std::vector<glz::generic> params_vec{glz::generic(height)};
@@ -477,9 +570,16 @@ BlockHashResponse YcashRpcClient::get_block_hash(int height) const
 
 std::string YcashRpcClient::get_transaction_raw_json(const std::string& tx_hash) const
 {
+    const std::string cache_key = "raw|getrawtransaction|" + tx_hash;
+    if (auto cached = RpcResponseCache::instance().get(cache_key))
+        return *cached;
+
     std::vector<glz::generic> params_vec{tx_hash, 1};
     std::string envelope = perform_rpc_http("getrawtransaction", glz::generic(params_vec), Backend::Adhoc);
-    return extract_result_raw(envelope);
+    std::string result = extract_result_raw(envelope);
+    if (!result.empty())
+        RpcResponseCache::instance().put(cache_key, result, RpcResponseCache::Class::BlockDependent);
+    return result;
 }
 
 RawTransaction YcashRpcClient::get_raw_transaction(const std::string& tx_hash, const std::string& block_hash) const

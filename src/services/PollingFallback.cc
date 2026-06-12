@@ -103,10 +103,12 @@ std::string PollingFallback::fetch_tip_hash()
 {
     try
     {
-        YcashRpcClient& client = YcashRpcClient::instance();
-        BlockCountResponse count_resp = client.get_block_count();
-        BlockHashResponse hash_resp = client.get_block_hash(count_resp.count);
-        return hash_resp.hash;
+        // thread_instance: the singleton's Adhoc curl handle is also used by
+        // BlockIndexer's idle height checks, and curl handles aren't
+        // thread-safe. One getbestblockhash replaces the former
+        // getblockcount + getblockhash pair.
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
+        return client.get_best_block_hash().hash;
     }
     catch (const std::exception& e)
     {

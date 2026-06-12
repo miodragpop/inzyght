@@ -2,7 +2,6 @@
 #include "glaze/json/json_concepts.hpp"
 #include "services/BlockchainState.h"
 #include "ycash_rpc_client.h"
-#include "ConfigManager.h"
 #include "Logger.h"
 #include "services/BlockIndexer.h"
 #include "orm/PostgresPool.h"
@@ -199,7 +198,6 @@ void TransactionController::get_all_transactions(const HttpRequestPtr& req, std:
 void TransactionController::get_transaction_verbose(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger {Logger::instance()};
-    ConfigManager& config {ConfigManager::instance()};
     glz::generic::object_t response {};
     std::string resp_body {};
 
@@ -227,7 +225,7 @@ void TransactionController::get_transaction_verbose(const HttpRequestPtr& req, s
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
 
         // Always try the main chain first. A non-coinbase tx from an orphaned
         // block is usually re-mined into a later main-chain block under the
@@ -323,11 +321,10 @@ void TransactionController::get_transaction_verbose(const HttpRequestPtr& req, s
 void TransactionController::get_transaction_raw(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger {Logger::instance()};
-    ConfigManager& config {ConfigManager::instance()};
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
         std::string raw = client.get_transaction_raw_json(hash);
         auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
         resp->setBody(raw);
@@ -346,14 +343,13 @@ void TransactionController::get_transaction_raw(const HttpRequestPtr& /*req*/, s
 void TransactionController::get_transaction_by_hash(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger = Logger::instance();
-    ConfigManager& config = ConfigManager::instance();
     glz::generic response;
     std::string response_str;
     glz::error_ctx ec;
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
 
         try
         {

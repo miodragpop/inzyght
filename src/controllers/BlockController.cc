@@ -1,7 +1,6 @@
 #include "BlockController.h"
 #include "glaze/json/generic.hpp"
 #include "ycash_rpc_client.h"
-#include "ConfigManager.h"
 #include "Logger.h"
 #include "services/BlockchainState.h"
 #include "services/BlockIndexer.h"
@@ -142,9 +141,8 @@ void BlockController::get_block_by_height(const HttpRequestPtr& req, std::functi
     try
     {
         Logger& logger = Logger::instance();
-        ConfigManager& config = ConfigManager::instance();
 
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
 
         try
         {
@@ -202,14 +200,13 @@ void BlockController::get_block_by_height(const HttpRequestPtr& req, std::functi
 void BlockController::get_block_by_hash(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger {Logger::instance()};
-    ConfigManager& config {ConfigManager::instance()};
     HttpResponsePtr resp {HttpResponse::newHttpResponse()};
     glz::generic::object_t response {};
     std::string resp_body {};
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
 
         try
         {
@@ -269,7 +266,6 @@ void BlockController::get_block_by_hash(const HttpRequestPtr& req, std::function
 void BlockController::get_block_verbose(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger {Logger::instance()};
-    ConfigManager& config {ConfigManager::instance()};
     glz::generic::object_t response {};
     std::string resp_body {};
 
@@ -282,7 +278,7 @@ void BlockController::get_block_verbose(const HttpRequestPtr& req, std::function
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
         YcashBlockVerbose block = client.get_block_verbose_by_hash(hash);
 
         // Fetch DB-enriched fields (miner address, reward)
@@ -409,11 +405,10 @@ void BlockController::get_block_verbose(const HttpRequestPtr& req, std::function
 void BlockController::get_block_raw(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& hash) const
 {
     Logger& logger {Logger::instance()};
-    ConfigManager& config {ConfigManager::instance()};
 
     try
     {
-        YcashRpcClient client(config.get_rpc_config());
+        YcashRpcClient& client = YcashRpcClient::thread_instance();
         std::string raw = client.get_block_raw_json(hash);
         auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
         resp->setBody(raw);
