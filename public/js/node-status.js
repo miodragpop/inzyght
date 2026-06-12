@@ -31,11 +31,27 @@
         if (title) badge.title = title;
     }
 
+    // Fills the #version-info line (index page hero) with explorer and node
+    // versions. No-op on pages without the element.
+    function setVersionLine(d) {
+        const el = document.getElementById('version-info');
+        if (!el) return;
+        const parts = [];
+        if (d.explorer_version) parts.push('Inzyght v' + d.explorer_version);
+        if (d.subversion) {
+            // ycashd reports subversion as "/MagicBean:3.7.0/"
+            const m = String(d.subversion).match(/^\/?([^:/]+):([^/]+)\/?$/);
+            parts.push('ycashd ' + (m ? 'v' + m[2] : d.subversion));
+        }
+        el.textContent = parts.join(' · ');
+    }
+
     function check() {
         fetch('/api/v1/network/info')
             .then(function (r) { return r.json(); })
             .then(function (resp) {
                 const d = (resp && resp.data) || {};
+                setVersionLine(d);
                 if (d.stale) {
                     setBadge(true, 'ycashd is not answering — data shown is ' +
                                    formatAge(d.as_of_age_seconds) + ' old');

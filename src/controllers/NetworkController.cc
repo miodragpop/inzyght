@@ -26,6 +26,7 @@ void NetworkController::get_network_info(const HttpRequestPtr& req, std::functio
         InfoResponseExtended cached_info_extended {current_state.get_cached_info_extended()};
 
         info["version"] = cached_info_extended.version;
+        info["subversion"] = cached_info_extended.subversion;
         info["protocolversion"] = cached_info_extended.protocolversion;
         info["blocks"] = cached_info_extended.blocks;
         info["connections"] = cached_info_extended.connections;
@@ -45,6 +46,8 @@ void NetworkController::get_network_info(const HttpRequestPtr& req, std::functio
 
     response["status"] = "success";
     response["data"]["version"] = info["version"];
+    response["data"]["subversion"] = info["subversion"];
+    response["data"]["explorer_version"] = inzyght::k_version;
     response["data"]["protocol_version"] = info["protocolversion"];
     response["data"]["blocks"] = info["blocks"];
     response["data"]["connections"] = info["connections"];
