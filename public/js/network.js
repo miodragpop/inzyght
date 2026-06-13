@@ -26,7 +26,7 @@ function initMap() {
             hover:   { fill: '#4a5280' }
         },
         markerStyle: {
-            initial: { fill: '#00d4ff', stroke: '#fff', strokeWidth: 1, r: 5 },
+            initial: { fill: '#00d4ff', stroke: '#fff', strokeWidth: 0.5, r: 3 },
             hover:   { fill: '#ff6b35', stroke: '#fff' }
         },
         markers: [],
@@ -34,16 +34,46 @@ function initMap() {
     });
 }
 
+// Colour a location by how many nodes share its coordinates.
+// 1 node → cyan, 2–4 → amber, 5+ → orange-red.
+function densityColor(count) {
+    if (count >= 5) return '#ff6b35';
+    if (count >= 2) return '#ffd24a';
+    return '#00d4ff';
+}
+
 function updateMap(peers) {
     if (!map) return;
 
-    const markers = peers
-        .filter(p => p.lat !== 0 || p.lon !== 0)
-        .map(p => ({
-            name: p.ip + (p.city ? ` — ${p.city}` : ''),
-            coords: [p.lat, p.lon]
-        }));
+    // Group peers by exact coordinate. GeoIP snaps same-city nodes to a shared
+    // centroid, so identical [lat, lon] reliably means "same place".
+    const groups = new Map();
+    for (const p of peers) {
+        if (p.lat === 0 && p.lon === 0) continue;
+        const key = `${p.lat},${p.lon}`;
+        let g = groups.get(key);
+        if (!g) {
+            g = { lat: p.lat, lon: p.lon, city: p.city, count: 0 };
+            groups.set(key, g);
+        }
+        g.count++;
+    }
 
+    // One marker per location, coloured and labelled by node count.
+    const markers = [...groups.values()].map(g => {
+        const place = g.city || `${g.lat.toFixed(2)}, ${g.lon.toFixed(2)}`;
+        return {
+            name: g.count === 1 ? place : `${place} — ${g.count} nodes`,
+            coords: [g.lat, g.lon],
+            // jsvectormap 1.5.3 uses marker.style directly as the `initial`
+            // style object, so this must be flat (no nested `initial`).
+            style: { fill: densityColor(g.count) }
+        };
+    });
+
+    // addMarkers appends in jsvectormap 1.5.3, so clear the previous set first
+    // (updateMap runs every 30s) to avoid stacking duplicates.
+    map.removeMarkers();
     map.addMarkers(markers);
 }
 
