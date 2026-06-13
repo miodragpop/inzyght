@@ -209,11 +209,29 @@ storage = memory
 
 [rate_limit]
 
-# Address endpoints (/api/v1/addresses/*)
+# How to identify the client for per-IP limiting.
+#
+# trust_proxy = false  → use the real TCP peer address. CORRECT for a
+#                        direct-to-internet deployment (Drogon terminates TLS
+#                        on 443 with no reverse proxy). X-Forwarded-For is
+#                        ignored, so a bot cannot spoof a new IP per request.
+#
+# trust_proxy = true   → honour X-Forwarded-For, but ONLY when the immediate
+#                        TCP peer is listed in trusted_proxies. Set this only
+#                        if a reverse proxy (Apache/nginx/Cloudflare) fronts the
+#                        app and sets XFF itself.
+trust_proxy = false
+
+# Peers permitted to set X-Forwarded-For (comma-separated). Only consulted when
+# trust_proxy = true. For Cloudflare, list its edge ranges (or front with a
+# local proxy and keep 127.0.0.1 here).
+trusted_proxies = 127.0.0.1,::1
+
+# Address endpoints (/api/v1/addresses/*) and /address/{id} page
 # These trigger expensive RPC + DB calls — keep tight.
 address_max_requests = 20
 address_window_seconds = 60
 
-# All other API endpoints
+# All other API endpoints and HTML pages
 api_max_requests = 120
 api_window_seconds = 60

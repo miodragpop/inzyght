@@ -11,6 +11,12 @@ using namespace drogon;
 
 // ── Shared sliding-window counter ─────────────────────────────────────────────
 // Tracks request timestamps per IP. Thread-safe.
+//
+// The per-IP map is bounded by opportunistic eviction: a record is dropped as
+// soon as its last request falls outside the window, and a periodic sweep
+// removes any stragglers. Without this, an attacker rotating (or spoofing) the
+// source IP would grow the map without limit — a memory-exhaustion DoS in its
+// own right.
 class SlidingWindowCounter
 {
 public:
@@ -22,8 +28,12 @@ private:
         std::deque<std::chrono::steady_clock::time_point> timestamps;
     };
 
+    // Remove IPs whose newest timestamp is older than `cutoff`. Caller holds mutex_.
+    void evict_stale(std::chrono::steady_clock::time_point cutoff);
+
     std::mutex mutex_;
     std::unordered_map<std::string, IpRecord> clients_;
+    std::chrono::steady_clock::time_point last_sweep_{};
 };
 
 // ── Strict limiter for expensive address endpoints ────────────────────────────
