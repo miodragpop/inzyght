@@ -62,6 +62,13 @@ static std::string get_client_ip(const HttpRequestPtr& req)
     return client.substr(b, e - b + 1);
 }
 
+// Loopback is exempt: the frontend served from this same host fetches its data
+// through these API endpoints, so localhost traffic must never be throttled.
+static bool is_loopback(const std::string& ip)
+{
+    return ip == "127.0.0.1" || ip == "::1" || ip == "::ffff:127.0.0.1";
+}
+
 static HttpResponsePtr rate_limited_response()
 {
     auto resp = HttpResponse::newHttpResponse(k429TooManyRequests, CT_APPLICATION_JSON);
@@ -127,6 +134,14 @@ void AddressRateLimiter::doFilter(const HttpRequestPtr& req,
     int max_req = cfg.get_int("rate_limit", "address_max_requests", 20);
     int window  = cfg.get_int("rate_limit", "address_window_seconds", 60);
 
+    // Local frontend traffic over loopback is never rate-limited. Keyed on the
+    // genuine TCP peer so a spoofed X-Forwarded-For can't claim the exemption.
+    if (is_loopback(req->getPeerAddr().toIp()))
+    {
+        fccb();
+        return;
+    }
+
     std::string ip = get_client_ip(req);
 
     if (!address_counter.check(ip, max_req, window))
@@ -150,6 +165,14 @@ void ApiRateLimiter::doFilter(const HttpRequestPtr& req,
     ConfigManager& cfg = ConfigManager::instance();
     int max_req = cfg.get_int("rate_limit", "api_max_requests", 120);
     int window  = cfg.get_int("rate_limit", "api_window_seconds", 60);
+
+    // Local frontend traffic over loopback is never rate-limited. Keyed on the
+    // genuine TCP peer so a spoofed X-Forwarded-For can't claim the exemption.
+    if (is_loopback(req->getPeerAddr().toIp()))
+    {
+        fccb();
+        return;
+    }
 
     std::string ip = get_client_ip(req);
 
