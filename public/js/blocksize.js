@@ -229,9 +229,7 @@
 
     window.addEventListener('mouseup', (e) => {
         if (!gesture || !chart) { gesture = null; return; }
-        if (gesture.mode === 'pan') {
-            chart.over.style.cursor = 'grab';
-        } else {
+        if (gesture.mode === 'zoom') {
             gesture.box.style.display = 'none';
             const p = localPos(chart.over, e);
             const x0 = Math.min(gesture.startX, p.x), x1 = Math.max(gesture.startX, p.x);
@@ -246,6 +244,8 @@
                 });
             }
         }
+        // Both pan and zoom return to the idle grab cursor.
+        chart.over.style.cursor = 'grab';
         gesture = null;
     });
 
@@ -267,6 +267,7 @@
                 gesture = { mode: 'zoom', startX: p.x, startY: p.y, box };
                 Object.assign(box.style, { display: 'block', left: p.x + 'px',
                     top: p.y + 'px', width: '0px', height: '0px' });
+                over.style.cursor = 'crosshair';
             } else {
                 gesture = { mode: 'pan', startX: p.x, startY: p.y,
                     panMin: u.scales.x.min, panMax: u.scales.x.max };
