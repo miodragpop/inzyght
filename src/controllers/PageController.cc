@@ -41,3 +41,9 @@ void PageController::serve_mempool_page(const HttpRequestPtr& /*req*/, std::func
     auto resp = HttpResponse::newFileResponse("./public/mempool.html");
     callback(resp);
 }
+
+void PageController::serve_supply_page(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback) const
+{
+    auto resp = HttpResponse::newFileResponse("./public/supply.html");
+    callback(resp);
+}

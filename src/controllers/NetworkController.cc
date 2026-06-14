@@ -5,7 +5,14 @@
 #include "glaze/json/generic.hpp"
 #include "Logger.h"
 #include "Version.h"
+#include "services/BlockIndexer.h"
+#include "orm/PostgresPool.h"
+#include <drogon/HttpResponse.h>
 #include <drogon/HttpTypes.h>
+#include <libpq-fe.h>
+#include <algorithm>
+#include <format>
+#include <vector>
 
 
 void NetworkController::get_network_info(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const
@@ -194,6 +201,158 @@ void NetworkController::get_version(const HttpRequestPtr& /*req*/, std::function
     auto resp = HttpResponse::newHttpResponse(drogon::k200OK, drogon::CT_APPLICATION_JSON);
     resp->setBody(resp_body);
     callback(resp);
+}
+
+
+// ── Supply-by-pool time series ─────────────────────────────────────────────────
+//
+// Returns cumulative supply (transparent / sprout / sapling / total) over a
+// height range, in YEC. The chart drives this: it passes the visible height
+// window (from/to) plus a target point count (~ the pixel width). When the
+// window spans more blocks than the display can show we sample one block per
+// stride; zoom in and the window shrinks until stride==1, i.e. full per-block
+// resolution.
+void NetworkController::get_supply_series(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const
+{
+    glz::generic::object_t response {};
+    std::string resp_body {};
+    Logger& logger = Logger::instance();
+
+    auto send = [&](drogon::HttpStatusCode code) {
+        auto resp = HttpResponse::newHttpResponse(code, drogon::CT_APPLICATION_JSON);
+        glz::write_json(response, resp_body);
+        resp->setBody(resp_body);
+        callback(resp);
+    };
+
+    auto empty_series = [&]() {
+        response["t"]           = glz::generic::array_t{};
+        response["h"]           = glz::generic::array_t{};
+        response["transparent"] = glz::generic::array_t{};
+        response["sprout"]      = glz::generic::array_t{};
+        response["sapling"]     = glz::generic::array_t{};
+        response["total"]       = glz::generic::array_t{};
+    };
+
+    try
+    {
+        if (BlockIndexer::instance().is_syncing())
+        {
+            response["status"]  = "success";
+            response["syncing"] = true;
+            empty_series();
+            send(drogon::k200OK);
+            return;
+        }
+
+        const auto& params = req->getParameters();
+
+        QueryConnectionGuard db;
+
+        // Resolve the chain's height bounds once so we can clamp the request.
+        long chain_lo = 0, chain_hi = 0;
+        bool have_bounds = false;
+        {
+            PGresult* b = PQexec(db.conn(), "SELECT MIN(height), MAX(height) FROM blocks");
+            if (PQresultStatus(b) == PGRES_TUPLES_OK && PQntuples(b) == 1 && !PQgetisnull(b, 0, 0))
+            {
+                chain_lo = std::stol(PQgetvalue(b, 0, 0));
+                chain_hi = std::stol(PQgetvalue(b, 0, 1));
+                have_bounds = true;
+            }
+            PQclear(b);
+        }
+
+        if (!have_bounds)
+        {
+            // Empty table — nothing indexed yet.
+            response["status"] = "success";
+            empty_series();
+            send(drogon::k200OK);
+            return;
+        }
+
+        auto parse_long = [&](const char* key, long fallback) -> long {
+            auto it = params.find(key);
+            if (it == params.end()) return fallback;
+            try { return std::stol(it->second); } catch (...) { return fallback; }
+        };
+
+        long from = std::clamp(parse_long("from", chain_lo), chain_lo, chain_hi);
+        long to   = std::clamp(parse_long("to",   chain_hi), chain_lo, chain_hi);
+        if (from > to) std::swap(from, to);
+
+        long points = std::clamp(parse_long("points", 2000L), 100L, 4000L);
+
+        const long span   = to - from + 1;           // inclusive block count
+        const long bucket = std::max<long>(1, (span + points - 1) / points);
+
+        // Even-stride sampling: take the last height of each `bucket`-sized
+        // stride, i.e. (height-from) % bucket == bucket-1, plus the final block
+        // so the most recent value always shows. Because `height` is a dense PK
+        // this is an index-friendly range scan that touches only the sampled
+        // rows — far cheaper than a DISTINCT ON, which would sort the whole
+        // range. For cumulative supply, evenly spaced samples are a faithful
+        // summary. When bucket==1 (fully zoomed in) every block is returned.
+        std::string query = std::format(
+            "SELECT height, timestamp, transparent_supply, sprout_supply, sapling_supply, chain_supply "
+            "FROM blocks "
+            "WHERE height BETWEEN {0} AND {1} "
+            "  AND ((height - {0}) % {2} = {2} - 1 OR height = {1}) "
+            "ORDER BY height ASC",
+            from, to, bucket);
+
+        PGresult* res = PQexec(db.conn(), query.c_str());
+        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        {
+            logger.errorf("Supply series query failed: {}", PQerrorMessage(db.conn()));
+            PQclear(res);
+            response["status"]  = "error";
+            response["message"] = "Database query failed";
+            send(drogon::k500InternalServerError);
+            return;
+        }
+
+        const int n = PQntuples(res);
+        glz::generic::array_t t, h, transparent, sprout, sapling, total;
+        t.reserve(n); h.reserve(n); transparent.reserve(n); sprout.reserve(n); sapling.reserve(n); total.reserve(n);
+
+        constexpr double COIN = 100000000.0;  // zat → YEC
+        for (int i = 0; i < n; ++i)
+        {
+            // array_t is a homogeneous f64 array. Heights (~1e6) and unix
+            // timestamps (~1.7e9) are well within exact f64 integer range.
+            h.push_back(static_cast<double>(std::stoll(PQgetvalue(res, i, 0))));
+            t.push_back(static_cast<double>(std::stoll(PQgetvalue(res, i, 1))));
+            transparent.push_back(std::stod(PQgetvalue(res, i, 2)) / COIN);
+            sprout.push_back(std::stod(PQgetvalue(res, i, 3)) / COIN);
+            sapling.push_back(std::stod(PQgetvalue(res, i, 4)) / COIN);
+            total.push_back(std::stod(PQgetvalue(res, i, 5)) / COIN);
+        }
+        PQclear(res);
+
+        response["status"]      = "success";
+        response["from"]        = glz::generic_i64(from);
+        response["to"]          = glz::generic_i64(to);
+        response["chain_min"]   = glz::generic_i64(chain_lo);
+        response["chain_max"]   = glz::generic_i64(chain_hi);
+        response["bucket"]      = glz::generic_i64(bucket);
+        response["t"]           = std::move(t);
+        response["h"]           = std::move(h);
+        response["transparent"] = std::move(transparent);
+        response["sprout"]      = std::move(sprout);
+        response["sapling"]     = std::move(sapling);
+        response["total"]       = std::move(total);
+
+        send(drogon::k200OK);
+    }
+    catch (const std::exception& e)
+    {
+        logger.errorf("Exception in get_supply_series: {}", e.what());
+        response["status"]  = "error";
+        response["message"] = "Server error";
+        send(drogon::k500InternalServerError);
+    }
 }
 
 

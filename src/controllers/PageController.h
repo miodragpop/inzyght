@@ -17,6 +17,7 @@ public:
     ADD_METHOD_TO(PageController::serve_transactions_list_page,  "/transactions", Get, "ApiRateLimiter");
     ADD_METHOD_TO(PageController::serve_api_page,                "/api",          Get, "ApiRateLimiter");
     ADD_METHOD_TO(PageController::serve_mempool_page,            "/mempool",      Get, "ApiRateLimiter");
+    ADD_METHOD_TO(PageController::serve_supply_page,             "/supply",       Get, "ApiRateLimiter");
     METHOD_LIST_END
 
     void serve_block_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& id) const;
@@ -26,4 +27,5 @@ public:
     void serve_transactions_list_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
     void serve_api_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
     void serve_mempool_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+    void serve_supply_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
 };

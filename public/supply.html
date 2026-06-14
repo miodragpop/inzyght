@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inzyght - Supply by Pool</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+
+    <style>
+        #supply-chart { width: 100%; }
+        /* uPlot draws onto a fixed-size canvas; the wrapper gives it room and a
+           themed backdrop that works in both light and dark mode. */
+        .chart-card .card-body { overflow-x: hidden; }
+        .u-legend { font-size: 0.9rem; }
+        .pool-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+        .chart-hint { font-size: 0.85rem; }
+    </style>
+    <script src="/js/theme.js"></script>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+</head>
+<body>
+
+    <div id="nav-placeholder" style="position:sticky;top:0;z-index:1030"></div>
+    <script>
+        fetch('/partials/header.html').then(r => r.text()).then(html => {
+            document.getElementById('nav-placeholder').innerHTML = html;
+            const _p = window.location.pathname;
+            document.querySelectorAll('#main-nav .nav-link').forEach(function(a) {
+                const _h = a.getAttribute('href');
+                if (_h === _p || (_h !== '/' && _p.startsWith(_h))) a.classList.add('active');
+            });
+            if (window.syncThemeButton) syncThemeButton();
+        });
+    </script>
+
+    <div class="container-fluid py-4">
+        <div class="d-flex align-items-center mb-3 flex-wrap gap-2">
+            <h2 class="mb-0"><i class="fa fa-line-chart text-success"></i> Supply by Pool</h2>
+            <div class="ms-auto d-flex align-items-center gap-2">
+                <span class="chart-hint text-muted me-2">
+                    <i class="fa fa-arrows"></i> Drag to pan &middot;
+                    <kbd>Ctrl</kbd>+scroll to zoom &middot;
+                    <kbd>Shift</kbd>+drag for box
+                </span>
+                <button id="reset-zoom" class="btn btn-outline-secondary btn-sm" disabled>
+                    <i class="fa fa-refresh"></i> Reset zoom
+                </button>
+            </div>
+        </div>
+
+        <p class="text-muted">
+            Cumulative coin supply held in each value pool, in YEC. The total is the
+            sum of the transparent, sprout and sapling pools. Zoom in for full
+            per-block resolution; the zoomed-out view is downsampled to stay fast.
+        </p>
+
+        <div id="sync-banner" class="alert alert-info d-none">
+            <i class="fa fa-spinner fa-spin"></i> The explorer is still syncing — supply history will appear once indexing completes.
+        </div>
+
+        <div id="error-banner" class="alert alert-danger d-none"></div>
+
+        <div class="card chart-card mb-3">
+            <div class="card-body">
+                <div id="chart-loading" class="text-center text-muted py-5">
+                    <i class="fa fa-spinner fa-spin fa-2x"></i>
+                    <div class="mt-2">Loading supply history…</div>
+                </div>
+                <div id="supply-chart"></div>
+            </div>
+        </div>
+
+        <div class="text-muted small">
+            <span id="range-label"></span>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+    <script src="/js/supply.js"></script>
+</body>
+</html>
