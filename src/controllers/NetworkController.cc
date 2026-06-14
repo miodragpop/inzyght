@@ -356,3 +356,267 @@ void NetworkController::get_supply_series(const HttpRequestPtr& req, std::functi
 }
 
 
+// ── Mining difficulty time series ──────────────────────────────────────────────
+//
+// Same shape and adaptive downsampling as get_supply_series, but difficulty is
+// NOT cumulative — it varies block to block — so a "last block per stride"
+// sample would alias spikes. Instead we average difficulty over each stride,
+// which is a faithful representative of the bucket and still an index-friendly
+// grouped scan on the height PK. When bucket==1 (fully zoomed in) the average is
+// over a single block, i.e. the exact per-block value.
+void NetworkController::get_difficulty_series(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const
+{
+    glz::generic::object_t response {};
+    std::string resp_body {};
+    Logger& logger = Logger::instance();
+
+    auto send = [&](drogon::HttpStatusCode code) {
+        auto resp = HttpResponse::newHttpResponse(code, drogon::CT_APPLICATION_JSON);
+        glz::write_json(response, resp_body);
+        resp->setBody(resp_body);
+        callback(resp);
+    };
+
+    auto empty_series = [&]() {
+        response["t"]          = glz::generic::array_t{};
+        response["h"]          = glz::generic::array_t{};
+        response["difficulty"] = glz::generic::array_t{};
+    };
+
+    try
+    {
+        if (BlockIndexer::instance().is_syncing())
+        {
+            response["status"]  = "success";
+            response["syncing"] = true;
+            empty_series();
+            send(drogon::k200OK);
+            return;
+        }
+
+        const auto& params = req->getParameters();
+
+        QueryConnectionGuard db;
+
+        long chain_lo = 0, chain_hi = 0;
+        bool have_bounds = false;
+        {
+            PGresult* b = PQexec(db.conn(), "SELECT MIN(height), MAX(height) FROM blocks");
+            if (PQresultStatus(b) == PGRES_TUPLES_OK && PQntuples(b) == 1 && !PQgetisnull(b, 0, 0))
+            {
+                chain_lo = std::stol(PQgetvalue(b, 0, 0));
+                chain_hi = std::stol(PQgetvalue(b, 0, 1));
+                have_bounds = true;
+            }
+            PQclear(b);
+        }
+
+        if (!have_bounds)
+        {
+            response["status"] = "success";
+            empty_series();
+            send(drogon::k200OK);
+            return;
+        }
+
+        auto parse_long = [&](const char* key, long fallback) -> long {
+            auto it = params.find(key);
+            if (it == params.end()) return fallback;
+            try { return std::stol(it->second); } catch (...) { return fallback; }
+        };
+
+        long from = std::clamp(parse_long("from", chain_lo), chain_lo, chain_hi);
+        long to   = std::clamp(parse_long("to",   chain_hi), chain_lo, chain_hi);
+        if (from > to) std::swap(from, to);
+
+        long points = std::clamp(parse_long("points", 2000L), 100L, 4000L);
+
+        const long span   = to - from + 1;
+        const long bucket = std::max<long>(1, (span + points - 1) / points);
+
+        // Group blocks into `bucket`-sized strides and average difficulty per
+        // stride. Representative height/time = the stride's last block (MAX), so
+        // the x positions match what the supply chart produces for the same
+        // window. Ordered chronologically for the chart.
+        std::string query = std::format(
+            "SELECT MAX(height) AS h, MAX(timestamp) AS t, AVG(difficulty) AS d "
+            "FROM blocks "
+            "WHERE height BETWEEN {0} AND {1} "
+            "GROUP BY (height - {0}) / {2} "
+            "ORDER BY h ASC",
+            from, to, bucket);
+
+        PGresult* res = PQexec(db.conn(), query.c_str());
+        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        {
+            logger.errorf("Difficulty series query failed: {}", PQerrorMessage(db.conn()));
+            PQclear(res);
+            response["status"]  = "error";
+            response["message"] = "Database query failed";
+            send(drogon::k500InternalServerError);
+            return;
+        }
+
+        const int n = PQntuples(res);
+        glz::generic::array_t t, h, difficulty;
+        t.reserve(n); h.reserve(n); difficulty.reserve(n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            h.push_back(static_cast<double>(std::stoll(PQgetvalue(res, i, 0))));
+            t.push_back(static_cast<double>(std::stoll(PQgetvalue(res, i, 1))));
+            difficulty.push_back(std::stod(PQgetvalue(res, i, 2)));
+        }
+        PQclear(res);
+
+        response["status"]     = "success";
+        response["from"]       = glz::generic_i64(from);
+        response["to"]         = glz::generic_i64(to);
+        response["chain_min"]  = glz::generic_i64(chain_lo);
+        response["chain_max"]  = glz::generic_i64(chain_hi);
+        response["bucket"]     = glz::generic_i64(bucket);
+        response["t"]          = std::move(t);
+        response["h"]          = std::move(h);
+        response["difficulty"] = std::move(difficulty);
+
+        send(drogon::k200OK);
+    }
+    catch (const std::exception& e)
+    {
+        logger.errorf("Exception in get_difficulty_series: {}", e.what());
+        response["status"]  = "error";
+        response["message"] = "Server error";
+        send(drogon::k500InternalServerError);
+    }
+}
+
+
+// ── Block size time series ─────────────────────────────────────────────────────
+//
+// Same shape and adaptive downsampling as get_difficulty_series. Block size is
+// not cumulative, so we average it over each stride (a faithful representative
+// that won't alias spikes), with the stride's last block giving the height/time
+// position. Sizes are returned in bytes; the frontend formats to KB/MB.
+void NetworkController::get_blocksize_series(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const
+{
+    glz::generic::object_t response {};
+    std::string resp_body {};
+    Logger& logger = Logger::instance();
+
+    auto send = [&](drogon::HttpStatusCode code) {
+        auto resp = HttpResponse::newHttpResponse(code, drogon::CT_APPLICATION_JSON);
+        glz::write_json(response, resp_body);
+        resp->setBody(resp_body);
+        callback(resp);
+    };
+
+    auto empty_series = [&]() {
+        response["t"]    = glz::generic::array_t{};
+        response["h"]    = glz::generic::array_t{};
+        response["size"] = glz::generic::array_t{};
+    };
+
+    try
+    {
+        if (BlockIndexer::instance().is_syncing())
+        {
+            response["status"]  = "success";
+            response["syncing"] = true;
+            empty_series();
+            send(drogon::k200OK);
+            return;
+        }
+
+        const auto& params = req->getParameters();
+
+        QueryConnectionGuard db;
+
+        long chain_lo = 0, chain_hi = 0;
+        bool have_bounds = false;
+        {
+            PGresult* b = PQexec(db.conn(), "SELECT MIN(height), MAX(height) FROM blocks");
+            if (PQresultStatus(b) == PGRES_TUPLES_OK && PQntuples(b) == 1 && !PQgetisnull(b, 0, 0))
+            {
+                chain_lo = std::stol(PQgetvalue(b, 0, 0));
+                chain_hi = std::stol(PQgetvalue(b, 0, 1));
+                have_bounds = true;
+            }
+            PQclear(b);
+        }
+
+        if (!have_bounds)
+        {
+            response["status"] = "success";
+            empty_series();
+            send(drogon::k200OK);
+            return;
+        }
+
+        auto parse_long = [&](const char* key, long fallback) -> long {
+            auto it = params.find(key);
+            if (it == params.end()) return fallback;
+            try { return std::stol(it->second); } catch (...) { return fallback; }
+        };
+
+        long from = std::clamp(parse_long("from", chain_lo), chain_lo, chain_hi);
+        long to   = std::clamp(parse_long("to",   chain_hi), chain_lo, chain_hi);
+        if (from > to) std::swap(from, to);
+
+        long points = std::clamp(parse_long("points", 2000L), 100L, 4000L);
+
+        const long span   = to - from + 1;
+        const long bucket = std::max<long>(1, (span + points - 1) / points);
+
+        std::string query = std::format(
+            "SELECT MAX(height) AS h, MAX(timestamp) AS t, AVG(size) AS s "
+            "FROM blocks "
+            "WHERE height BETWEEN {0} AND {1} "
+            "GROUP BY (height - {0}) / {2} "
+            "ORDER BY h ASC",
+            from, to, bucket);
+
+        PGresult* res = PQexec(db.conn(), query.c_str());
+        if (PQresultStatus(res) != PGRES_TUPLES_OK)
+        {
+            logger.errorf("Block size series query failed: {}", PQerrorMessage(db.conn()));
+            PQclear(res);
+            response["status"]  = "error";
+            response["message"] = "Database query failed";
+            send(drogon::k500InternalServerError);
+            return;
+        }
+
+        const int n = PQntuples(res);
+        glz::generic::array_t t, h, size;
+        t.reserve(n); h.reserve(n); size.reserve(n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            h.push_back(static_cast<double>(std::stoll(PQgetvalue(res, i, 0))));
+            t.push_back(static_cast<double>(std::stoll(PQgetvalue(res, i, 1))));
+            size.push_back(std::stod(PQgetvalue(res, i, 2)));
+        }
+        PQclear(res);
+
+        response["status"]    = "success";
+        response["from"]      = glz::generic_i64(from);
+        response["to"]        = glz::generic_i64(to);
+        response["chain_min"] = glz::generic_i64(chain_lo);
+        response["chain_max"] = glz::generic_i64(chain_hi);
+        response["bucket"]    = glz::generic_i64(bucket);
+        response["t"]         = std::move(t);
+        response["h"]         = std::move(h);
+        response["size"]      = std::move(size);
+
+        send(drogon::k200OK);
+    }
+    catch (const std::exception& e)
+    {
+        logger.errorf("Exception in get_blocksize_series: {}", e.what());
+        response["status"]  = "error";
+        response["message"] = "Server error";
+        send(drogon::k500InternalServerError);
+    }
+}
+
+

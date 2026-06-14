@@ -47,3 +47,15 @@ void PageController::serve_supply_page(const HttpRequestPtr& /*req*/, std::funct
     auto resp = HttpResponse::newFileResponse("./public/supply.html");
     callback(resp);
 }
+
+void PageController::serve_difficulty_page(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback) const
+{
+    auto resp = HttpResponse::newFileResponse("./public/difficulty.html");
+    callback(resp);
+}
+
+void PageController::serve_blocksize_page(const HttpRequestPtr& /*req*/, std::function<void(const HttpResponsePtr&)>&& callback) const
+{
+    auto resp = HttpResponse::newFileResponse("./public/blocksize.html");
+    callback(resp);
+}

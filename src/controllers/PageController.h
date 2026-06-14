@@ -18,6 +18,8 @@ public:
     ADD_METHOD_TO(PageController::serve_api_page,                "/api",          Get, "ApiRateLimiter");
     ADD_METHOD_TO(PageController::serve_mempool_page,            "/mempool",      Get, "ApiRateLimiter");
     ADD_METHOD_TO(PageController::serve_supply_page,             "/supply",       Get, "ApiRateLimiter");
+    ADD_METHOD_TO(PageController::serve_difficulty_page,         "/difficulty",   Get, "ApiRateLimiter");
+    ADD_METHOD_TO(PageController::serve_blocksize_page,          "/blocksize",    Get, "ApiRateLimiter");
     METHOD_LIST_END
 
     void serve_block_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& id) const;
@@ -28,4 +30,6 @@ public:
     void serve_api_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
     void serve_mempool_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
     void serve_supply_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+    void serve_difficulty_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
+    void serve_blocksize_page(const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) const;
 };

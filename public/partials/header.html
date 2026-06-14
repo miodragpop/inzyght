@@ -25,8 +25,15 @@
                 <li class="nav-item">
                     <a class="nav-link" href="/mempool">Mempool</a>
                 </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="/supply">Supply</a>
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle" href="#" id="chartsDropdown" role="button"
+                       data-bs-toggle="dropdown" aria-expanded="false"
+                       data-match="/supply,/difficulty,/blocksize">Charts</a>
+                    <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="chartsDropdown">
+                        <li><a class="dropdown-item" href="/supply">Supply</a></li>
+                        <li><a class="dropdown-item" href="/difficulty">Difficulty</a></li>
+                        <li><a class="dropdown-item" href="/blocksize">Block Size</a></li>
+                    </ul>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link" href="/api">API</a>
