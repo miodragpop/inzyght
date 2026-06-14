@@ -46,12 +46,21 @@
         el.textContent = parts.join(' · ');
     }
 
+    // Shows the explorer version next to the navbar brand on every page.
+    // No-op until the header partial is injected and a version is known.
+    function setBrandVersion(d) {
+        const el = document.getElementById('brand-version');
+        if (!el || !d.explorer_version) return;
+        el.textContent = 'v' + d.explorer_version;
+    }
+
     function check() {
         fetch('/api/v1/network/info')
             .then(function (r) { return r.json(); })
             .then(function (resp) {
                 const d = (resp && resp.data) || {};
                 setVersionLine(d);
+                setBrandVersion(d);
                 if (d.stale) {
                     setBadge(true, 'ycashd is not answering — data shown is ' +
                                    formatAge(d.as_of_age_seconds) + ' old');
@@ -68,8 +77,18 @@
     }
 
     document.addEventListener('DOMContentLoaded', function () {
-        // Small delay so the async-injected header partial is in the DOM
-        // before the first toggle attempt.
-        setTimeout(check, 1500);
+        // The navbar (#brand-version, #node-stale-badge) comes from header.html,
+        // which each page injects asynchronously — so it may not be in the DOM
+        // yet. Rather than guess a fixed delay, fire as soon as the brand element
+        // appears (checking briefly), with a hard fallback so we never wait long.
+        let waited = 0;
+        (function awaitHeader() {
+            if (document.getElementById('brand-version') || waited >= 3000) {
+                check();
+            } else {
+                waited += 50;
+                setTimeout(awaitHeader, 50);
+            }
+        })();
     });
 })();

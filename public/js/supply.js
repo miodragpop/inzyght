@@ -39,6 +39,9 @@
     let yZoom = null;                        // {min,max} when y is manually zoomed, else null
     let curBucket = 1;                       // sampling stride of the loaded data
     let pendingFrom = null, pendingTo = null; // height window of the in-flight fetch
+    let curData = null;                      // last uPlot data array (for theme rebuilds)
+    let themeReady = false;                  // true once the first build is done
+    let lastTheme = document.documentElement.getAttribute('data-bs-theme');
 
     function fmtYEC(v) {
         if (v == null) return '–';
@@ -134,7 +137,22 @@
             // all three gestures ourselves in attachPanZoom: drag = pan,
             // Shift+drag = box zoom, Ctrl+wheel = zoom at cursor.
             cursor: { drag: { x: false, y: false, setScale: false } },
-            legend: { live: true },
+            legend: {
+                live: true,
+                // Make the legend swatch a solid filled square in the series
+                // colour. uPlot's default draws a 2px border and clips the
+                // background to the padding box (background-clip:padding-box),
+                // so on a light theme it reads as a thin outline. Setting the
+                // border width to 0 and filling the background with the series
+                // stroke gives a fully filled square.
+                markers: {
+                    width: 0,
+                    // series.stroke is wrapped into a function by uPlot, so call
+                    // it (self, i) to get the colour string — returning the
+                    // function itself leaves background unset (invisible marker).
+                    fill: (self, i) => self.series[i].stroke(self, i),
+                },
+            },
             hooks: {
                 setScale: [
                     (self, key) => {
@@ -156,16 +174,82 @@
 
         chart = new uPlot(opts, data, el.chart);
         attachPanZoom(chart);
+
+        // Restore the current view after (re)construction — the constructor
+        // renders at the data's full extent, but a theme rebuild must preserve
+        // the user's zoom/pan. Re-applying the same x window is a no-op for the
+        // re-fetch guard (it compares against curFrom/curTo).
+        if (curFrom != null && (curFrom > chainMin || curTo < chainMax)) {
+            chart.setScale('x', { min: curFrom, max: curTo });
+        }
+        if (yZoom) chart.setScale('y', { min: yZoom.min, max: yZoom.max });
     }
 
     // ── Pan, box zoom, and wheel zoom ──────────────────────────────────────────
     // uPlot has no built-in pan or wheel zoom, and its drag-select can't be
     // modifier-gated, so we implement all three here by driving the scales
     // directly. Every x-scale change fires setScale('x') → maybeRefetch.
-    function attachPanZoom(u) {
-        const over = u.over;   // the plot's interaction surface
+    //
+    // Gesture state and the window-level move/up listeners live at module scope
+    // and operate on whatever `chart` is current. This matters because a theme
+    // change destroys and rebuilds the chart: per-chart listeners on `over` and
+    // the box element are torn down with it, but window listeners would
+    // otherwise accumulate and fire against a destroyed instance.
+    let gesture = null;   // { mode:'pan'|'zoom', startX, startY, panMin, panMax, box } | null
 
-        // A translucent rectangle we draw during a Shift+drag box zoom.
+    function localPos(over, e) {
+        const rect = over.getBoundingClientRect();
+        return { x: e.clientX - rect.left, y: e.clientY - rect.top, rect };
+    }
+
+    window.addEventListener('mousemove', (e) => {
+        if (!gesture || !chart) return;
+        const p = localPos(chart.over, e);
+        if (gesture.mode === 'pan') {
+            const perPx = (gesture.panMax - gesture.panMin) / p.rect.width;
+            const dx = (p.x - gesture.startX) * perPx;
+            // Dragging right reveals earlier blocks.
+            let newMin = gesture.panMin - dx, newMax = gesture.panMax - dx;
+            const span = newMax - newMin;
+            if (newMin < chainMin) { newMin = chainMin; newMax = chainMin + span; }
+            if (newMax > chainMax) { newMax = chainMax; newMin = chainMax - span; }
+            chart.setScale('x', { min: newMin, max: newMax });
+        } else {
+            const x = Math.max(0, Math.min(p.x, p.rect.width));
+            const y = Math.max(0, Math.min(p.y, p.rect.height));
+            Object.assign(gesture.box.style, {
+                left: Math.min(gesture.startX, x) + 'px', top: Math.min(gesture.startY, y) + 'px',
+                width: Math.abs(x - gesture.startX) + 'px', height: Math.abs(y - gesture.startY) + 'px',
+            });
+        }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+        if (!gesture || !chart) { gesture = null; return; }
+        if (gesture.mode === 'pan') {
+            chart.over.style.cursor = 'grab';
+        } else {
+            gesture.box.style.display = 'none';
+            const p = localPos(chart.over, e);
+            const x0 = Math.min(gesture.startX, p.x), x1 = Math.max(gesture.startX, p.x);
+            const y0 = Math.min(gesture.startY, p.y), y1 = Math.max(gesture.startY, p.y);
+            if (x1 - x0 > 4 && y1 - y0 > 4) {   // ignore an accidental tiny box
+                const xa = chart.posToVal(x0, 'x'), xb = chart.posToVal(x1, 'x');
+                // y screen coords are top-down; posToVal handles the flip.
+                const ya = chart.posToVal(y1, 'y'), yb = chart.posToVal(y0, 'y');
+                chart.batch(() => {
+                    chart.setScale('x', { min: Math.min(xa, xb), max: Math.max(xa, xb) });
+                    chart.setScale('y', { min: Math.min(ya, yb), max: Math.max(ya, yb) });
+                });
+            }
+        }
+        gesture = null;
+    });
+
+    // Per-chart listeners: on `over` (torn down with the chart) and the box el.
+    function attachPanZoom(u) {
+        const over = u.over;
+
         const box = document.createElement('div');
         Object.assign(box.style, {
             position: 'absolute', pointerEvents: 'none', display: 'none',
@@ -173,76 +257,19 @@
         });
         over.appendChild(box);
 
-        let mode = null;                       // 'pan' | 'zoom' | null
-        let startX = 0, startY = 0;            // pointer at gesture start (CSS px in `over`)
-        let panMin = 0, panMax = 0;            // x-scale snapshot for panning
-
-        function localPos(e) {
-            const rect = over.getBoundingClientRect();
-            return { x: e.clientX - rect.left, y: e.clientY - rect.top, rect };
-        }
-
         over.addEventListener('mousedown', (e) => {
             if (e.button !== 0) return;
-            const p = localPos(e);
-            startX = p.x; startY = p.y;
+            const p = localPos(over, e);
             if (e.shiftKey) {
-                mode = 'zoom';
-                Object.assign(box.style, { display: 'block', left: startX + 'px',
-                    top: startY + 'px', width: '0px', height: '0px' });
+                gesture = { mode: 'zoom', startX: p.x, startY: p.y, box };
+                Object.assign(box.style, { display: 'block', left: p.x + 'px',
+                    top: p.y + 'px', width: '0px', height: '0px' });
             } else {
-                mode = 'pan';
-                panMin = u.scales.x.min;
-                panMax = u.scales.x.max;
+                gesture = { mode: 'pan', startX: p.x, startY: p.y,
+                    panMin: u.scales.x.min, panMax: u.scales.x.max };
                 over.style.cursor = 'grabbing';
             }
             e.preventDefault();
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (!mode) return;
-            const p = localPos(e);
-            if (mode === 'pan') {
-                const perPx = (panMax - panMin) / p.rect.width;
-                const dx = (p.x - startX) * perPx;
-                // Dragging right reveals earlier blocks.
-                let newMin = panMin - dx, newMax = panMax - dx;
-                const span = newMax - newMin;
-                if (newMin < chainMin) { newMin = chainMin; newMax = chainMin + span; }
-                if (newMax > chainMax) { newMax = chainMax; newMin = chainMax - span; }
-                u.setScale('x', { min: newMin, max: newMax });
-            } else {
-                // Draw the zoom rectangle (clamped to the plot area).
-                const x = Math.max(0, Math.min(p.x, p.rect.width));
-                const y = Math.max(0, Math.min(p.y, p.rect.height));
-                Object.assign(box.style, {
-                    left: Math.min(startX, x) + 'px', top: Math.min(startY, y) + 'px',
-                    width: Math.abs(x - startX) + 'px', height: Math.abs(y - startY) + 'px',
-                });
-            }
-        });
-
-        window.addEventListener('mouseup', (e) => {
-            if (!mode) return;
-            if (mode === 'pan') {
-                over.style.cursor = 'grab';
-            } else {
-                box.style.display = 'none';
-                const p = localPos(e);
-                const x0 = Math.min(startX, p.x), x1 = Math.max(startX, p.x);
-                const y0 = Math.min(startY, p.y), y1 = Math.max(startY, p.y);
-                // Ignore an accidental tiny box.
-                if (x1 - x0 > 4 && y1 - y0 > 4) {
-                    const xa = u.posToVal(x0, 'x'), xb = u.posToVal(x1, 'x');
-                    // y screen coords are top-down; posToVal handles the flip.
-                    const ya = u.posToVal(y1, 'y'), yb = u.posToVal(y0, 'y');
-                    u.batch(() => {
-                        u.setScale('x', { min: Math.min(xa, xb), max: Math.max(xa, xb) });
-                        u.setScale('y', { min: Math.min(ya, yb), max: Math.max(ya, yb) });
-                    });
-                }
-            }
-            mode = null;
         });
 
         // ── Ctrl+wheel to zoom x around the cursor ──
@@ -250,7 +277,7 @@
             if (!e.ctrlKey) return;   // plain scroll still scrolls the page
             e.preventDefault();
             const { min, max } = u.scales.x;
-            const cursorVal = u.posToVal(localPos(e).x, 'x');
+            const cursorVal = u.posToVal(localPos(over, e).x, 'x');
             const factor = e.deltaY < 0 ? 0.8 : 1.25;   // up = zoom in
             let newMin = cursorVal - (cursorVal - min) * factor;
             let newMax = cursorVal + (max - cursorVal) * factor;
@@ -279,10 +306,17 @@
             payload.sprout,
             payload.sapling,
         ];
+        curData = data;   // kept so a theme change can rebuild without re-fetching
 
         if (!chart) {
             el.loading.classList.add('d-none');
             buildChart(data);
+            // Sync the theme baseline to *now*, after the first build. Any theme
+            // attribute writes that happened during load (theme.js applies it in
+            // <head>, then the header callback re-applies the same value) are
+            // already reflected; only a later genuine toggle should rebuild.
+            lastTheme = document.documentElement.getAttribute('data-bs-theme');
+            themeReady = true;
         } else {
             chart.setData(data);
             // setData re-auto-ranges y. If the user pinned a y-zoom, restore it
@@ -386,11 +420,27 @@
         }, 150);
     });
 
+    // Recolour the chart on theme switch. uPlot bakes axis stroke/grid colours
+    // in at construction and won't pick up reassigned values on redraw(), so we
+    // destroy and rebuild with the current theme's colours. buildChart re-reads
+    // themeStroke() and restores the current zoom/pan and y-scale, so the view
+    // doesn't jump and no re-fetch is triggered.
+    //
+    // theme.js re-sets data-bs-theme to its *current* value on load (in <head>,
+    // then again via syncThemeButton in the header callback). A MutationObserver
+    // fires on any attribute set, even a no-op. Rebuilding on those load-time
+    // writes races the initial build and makes the chart/markers render
+    // intermittently, so we ignore mutations until the first build completes
+    // (themeReady) and only rebuild on a genuine value change.
     new MutationObserver(() => {
-        if (!chart) return;
-        const t = themeStroke();
-        chart.axes.forEach(a => { a.stroke = t.axis; if (a.grid) a.grid.stroke = t.grid; });
-        chart.redraw();
+        if (!themeReady) return;
+        const theme = document.documentElement.getAttribute('data-bs-theme');
+        if (theme === lastTheme) return;
+        lastTheme = theme;
+        if (!chart || !curData) return;
+        chart.destroy();
+        chart = null;
+        buildChart(curData);
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-bs-theme'] });
 
     // Initial load: full chain.

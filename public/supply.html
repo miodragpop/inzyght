@@ -16,10 +16,14 @@
            themed backdrop that works in both light and dark mode. */
         .chart-card .card-body { overflow-x: hidden; }
         .u-legend { font-size: 0.9rem; }
-        .pool-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+        /* Solid filled legend swatch. uPlot clips the marker background to the
+           padding box, so override that to border-box so the fill (set in JS to
+           the series colour) covers the whole square on any theme. */
+        .u-legend .u-marker { background-clip: border-box !important; border-radius: 2px; }
         .chart-hint { font-size: 0.85rem; }
     </style>
     <script src="/js/theme.js"></script>
+    <script src="/js/node-status.js" defer></script>
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
 </head>
 <body>
