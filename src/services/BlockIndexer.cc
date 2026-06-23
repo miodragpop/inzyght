@@ -1466,13 +1466,18 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
                 timing.prep_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     copy_start - db_start).count();
 
-                // Atomic write: blocks, their transactions, and the persisted
-                // headers pointer all commit together (or all roll back). This
-                // closes the torn-write window where a crash between the two
-                // COPYs left blocks without their transactions — which, because
-                // restart resumes from MAX(blocks.height), could never be
-                // backfilled. A rolled-back sub-batch is simply re-fetched from
-                // RPC on the next pass.
+                // Atomic write: a block sub-batch and its transactions commit
+                // together (or all roll back). This closes the torn-write window
+                // where a crash between the two COPYs left blocks without their
+                // transactions — which, because restart resumes from
+                // MAX(blocks.height), could never be recovered. A rolled-back
+                // sub-batch is simply re-fetched from RPC on the next pass.
+                //
+                // The sync_progress pointer is intentionally NOT updated here:
+                // it is persisted once per outer batch by the indexer thread, and
+                // startup resumes from MAX(blocks.height) regardless. Writing it
+                // per sub-batch (with its SELECT MAX(id) FROM transactions) was a
+                // large, needless per-commit cost.
                 try
                 {
                     CopyTxn txn;
@@ -1489,14 +1494,6 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
                         CopyResult tx_result = txn.copy_binary("transactions", tx_columns, tx_copy_buf);
                         logger.debugf("BlockIndexer: Consumer - COPY inserted {} transactions", tx_result.rows_affected);
                     }
-
-                    // Persist the headers pointer inside the same transaction so
-                    // sync_progress can never point past committed blocks/txs.
-                    int total_h = progress_total_height.load(std::memory_order_acquire);
-                    if (total_h < fetched_data_batch.end_height) total_h = fetched_data_batch.end_height;
-                    txn.exec(std::format(
-                        "SELECT update_sync_progress('headers', {}, {}, {}, 'syncing', '')",
-                        fetched_data_batch.end_height, total_h, fetched_data_batch.end_height));
 
                     txn.commit();
                 }
