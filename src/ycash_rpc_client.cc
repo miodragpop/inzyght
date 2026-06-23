@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <format>
 #include <optional>
+#include <unordered_map>
 #include <curl/curl.h>
 #include "glaze/glaze.hpp" // IWYU pragma: keep
 #include "models/RpcResponses.h"
@@ -695,9 +696,37 @@ std::vector<YcashBlock> YcashRpcClient::batch_get_block_headers(const std::vecto
     response_body.clear();
     response_body.shrink_to_fit();
 
-    for (const auto& [jsonrpc, id, result, error] : rpc_results)
+    // JSON-RPC batch responses may arrive in any order, and any element can
+    // carry an error instead of a result. Index successful results by id (the
+    // height we set on each request) and re-emit in the requested order. Crucially,
+    // OMIT any missing/errored entry rather than substituting a default YcashBlock{}:
+    // a default block (time=0, empty hash) would otherwise be written to the DB as a
+    // zero-timestamp / invalid block, and — because the size check below would still
+    // pass — would silently corrupt the batch. Omitting it makes size != heights,
+    // which triggers the caller's retry.
+    std::unordered_map<int, YcashBlock> by_height;
+    by_height.reserve(rpc_results.size());
+    for (auto& r : rpc_results)
     {
-        results.emplace_back(result.value_or(YcashBlock {}));
+        if (r.result.has_value())
+        {
+            by_height.emplace(r.id, std::move(r.result.value()));
+        }
+        else if (r.error.has_value())
+        {
+            logger.warnf("RPC: getblock id {} returned error: {}", r.id, r.error.value());
+        }
+    }
+
+    for (const int h : heights)
+    {
+        auto it = by_height.find(h);
+        if (it != by_height.end())
+        {
+            results.emplace_back(std::move(it->second));
+        }
+        // else: response for this height was missing/errored — leave it out so
+        // the caller sees a short vector and retries the batch.
     }
 
     rpc_results.clear();

@@ -319,8 +319,19 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
             }
             else
             {
-                // Blockchain is fully synced - wait for new blocks via ZeroMQ events
+                // Caught up to the tip for forward sync.
                 flag_syncing = false;
+
+                // Before idling, fill one chunk of any historical gap left by
+                // earlier partial-batch failures. Each call does bounded work and
+                // yields back here so new blocks are still picked up promptly
+                // between chunks.
+                if (backfill_next_gap(stop_token))
+                {
+                    continue;  // more gaps may remain; re-check tip then fill next
+                }
+
+                // Blockchain is fully synced - wait for new blocks via ZeroMQ events
                 update_sync_progress(BT_HEADERS, current_height, blockchain_height, "completed");
                 logger.infof("BlockIndexer: Block headers indexing completed at id {}", current_height);
 
@@ -909,6 +920,97 @@ int BlockIndexer::repair_torn_transaction_writes() {
     PQclear(res);
 
     return target_height;
+}
+
+bool BlockIndexer::backfill_next_gap(std::stop_token stop_token) {
+    PGconn* conn = static_cast<PGconn*>(db_connection_);
+    if (!conn || PQstatus(conn) != CONNECTION_OK) {
+        return false;
+    }
+
+    // Lazily load every missing range once (one window scan), then drain it over
+    // successive idle cycles. New gaps should not form post-fix, so a single load
+    // per process run is sufficient; a restart re-scans.
+    if (!backfill_loaded_) {
+        PGresult* res = PQexec(conn,
+            "SELECT gap_start, gap_end FROM ("
+            "  SELECT height + 1 AS gap_start, "
+            "         LEAD(height) OVER (ORDER BY height) - 1 AS gap_end "
+            "  FROM blocks"
+            ") s "
+            "WHERE gap_end >= gap_start "
+            "ORDER BY gap_start");
+
+        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+            logger.warnf("BlockIndexer: Gap scan failed: {}", PQerrorMessage(conn));
+            if (res) PQclear(res);
+            return false;
+        }
+
+        int rows = PQntuples(res);
+        long total_missing = 0;
+        backfill_ranges_.clear();
+        backfill_ranges_.reserve(rows);
+        for (int i = 0; i < rows; ++i) {
+            int gs = atoi(PQgetvalue(res, i, 0));
+            int ge = atoi(PQgetvalue(res, i, 1));
+            if (ge >= gs) {
+                backfill_ranges_.emplace_back(gs, ge);
+                total_missing += (ge - gs + 1);
+            }
+        }
+        PQclear(res);
+
+        backfill_cursor_ = 0;
+        backfill_loaded_ = true;
+
+        if (backfill_ranges_.empty()) {
+            logger.info("BlockIndexer: Gap backfill - no missing blocks, chain is contiguous");
+        } else {
+            logger.warnf("BlockIndexer: Gap backfill - {} missing block(s) across {} range(s); filling while idle at tip",
+                         total_missing, backfill_ranges_.size());
+        }
+    }
+
+    if (backfill_cursor_ >= backfill_ranges_.size()) {
+        return false;  // all gaps drained
+    }
+
+    auto& range = backfill_ranges_[backfill_cursor_];
+    int gap_start = range.first;
+    int gap_end   = range.second;
+
+    // Bound each call to one chunk so a large contiguous gap doesn't starve
+    // new-block indexing; leave the remainder for the next idle cycle.
+    int chunk_end = std::min(gap_end, gap_start + BACKFILL_CHUNK - 1);
+
+    logger.infof("BlockIndexer: Backfilling missing blocks {} - {} (range {} - {})",
+                 gap_start, chunk_end, gap_start, gap_end);
+
+    flag_backfilling.store(true, std::memory_order_release);
+    bool ok = index_chain_data_batch(stop_token, BT_HEADERS, gap_start, chunk_end);
+    flag_backfilling.store(false, std::memory_order_release);
+
+    if (stop_token.stop_requested()) {
+        return false;
+    }
+
+    if (!ok) {
+        // Leave this range in place and stop backfilling this cycle; the idle
+        // loop retries after its wait. Advance the cursor past it so a single
+        // persistently-bad range can't wedge the whole backfill.
+        logger.warnf("BlockIndexer: Backfill of {} - {} failed; skipping range", gap_start, chunk_end);
+        backfill_cursor_++;
+        return true;
+    }
+
+    if (chunk_end < gap_end) {
+        range.first = chunk_end + 1;  // more of this range remains
+    } else {
+        backfill_cursor_++;           // range complete
+    }
+
+    return true;
 }
 
 bool BlockIndexer::detect_reorg(int height_to_check) {
@@ -1596,11 +1698,17 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
 
                     // Persist the headers pointer inside the same transaction so
                     // sync_progress can never point past committed blocks/txs.
-                    int total_h = progress_total_height.load(std::memory_order_acquire);
-                    if (total_h < fetched_data_batch.end_height) total_h = fetched_data_batch.end_height;
-                    txn.exec(std::format(
-                        "SELECT update_sync_progress('headers', {}, {}, {}, 'syncing', '')",
-                        fetched_data_batch.end_height, total_h, fetched_data_batch.end_height));
+                    // Skip during gap backfill: those blocks are below the tip, so
+                    // advancing (or rewinding) the forward-sync pointer to a gap
+                    // height would re-index already-present blocks.
+                    if (!flag_backfilling.load(std::memory_order_acquire))
+                    {
+                        int total_h = progress_total_height.load(std::memory_order_acquire);
+                        if (total_h < fetched_data_batch.end_height) total_h = fetched_data_batch.end_height;
+                        txn.exec(std::format(
+                            "SELECT update_sync_progress('headers', {}, {}, {}, 'syncing', '')",
+                            fetched_data_batch.end_height, total_h, fetched_data_batch.end_height));
+                    }
 
                     txn.commit();
                 }
@@ -1631,6 +1739,12 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
                     batch_timing = timing;
                 }
 
+                // Forward-sync progress/speed tracking is keyed to the rising tip.
+                // Gap backfill processes low historical heights, so skip these
+                // updates entirely while backfilling to avoid corrupting the
+                // current-height, speed window, and ETA.
+                if (!flag_backfilling.load(std::memory_order_acquire))
+                {
                 progress_current_height = fetched_data_batch.end_height;
                 record_speed_sample(fetched_data_batch.end_height);
                 int current_height = progress_current_height;
@@ -1676,6 +1790,7 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
 
                     progress_recent_window_start_height = new_window_start;
                 }
+                }  // end if (!flag_backfilling)
 
                 // Explicitly free batch data to ensure memory is returned to OS
                 fetched_data_batch.heights.clear();
