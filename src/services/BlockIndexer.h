@@ -6,8 +6,6 @@
 #include <mutex>
 #include <chrono>
 #include <deque>
-#include <vector>
-#include <utility>
 #include <condition_variable>
 #include "RpcConfig.h"
 #include "models/RpcResponses.h"
@@ -153,20 +151,6 @@ class BlockIndexer
         // Initialize database connection
         bool initialize_database();
 
-        // Startup integrity repair: find the lowest block whose committed
-        // transaction count disagrees with its recorded tx_count (a torn write
-        // from a pre-fix crash) and roll the chain back to just before it so the
-        // normal catchup re-indexes the affected range cleanly. Returns the
-        // height repaired back to, or -1 if the chain is already consistent.
-        int repair_torn_transaction_writes();
-
-        // Fill one chunk of the lowest historical block gap (holes left below the
-        // tip by earlier partial-batch failures). Re-indexes the missing heights
-        // through the normal pipeline without touching the forward-sync pointer.
-        // Returns true if a gap chunk was processed (more may remain), false when
-        // no gaps are left to fill. Called while idle at the tip.
-        bool backfill_next_gap(std::stop_token stop_token);
-
         // Reorg detection and handling (for chain reorganizations)
         bool detect_reorg(int height_to_check);
         int find_common_ancestor(int start_height);
@@ -190,13 +174,6 @@ class BlockIndexer
         std::jthread indexing_thread;
         std::atomic<bool> flag_running{false};
         std::atomic<bool> flag_syncing{false};  // True when actively catching up, false when fully synced
-        std::atomic<bool> flag_backfilling{false};  // True while filling a historical gap (suppresses forward-sync progress writes)
-
-        // Historical gap backfill state (lazily loaded once, drained over idle cycles)
-        std::vector<std::pair<int, int>> backfill_ranges_;  // [start,end] missing ranges, ascending
-        size_t backfill_cursor_ = 0;
-        bool backfill_loaded_ = false;
-        static constexpr int BACKFILL_CHUNK = 10000;  // max heights filled per backfill_next_gap() call
 
         // Progress tracking (all atomic - no mutex needed for single-writer main thread)
         std::atomic<int> progress_current_height{0};

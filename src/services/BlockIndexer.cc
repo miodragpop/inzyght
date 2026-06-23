@@ -117,15 +117,6 @@ void BlockIndexer::start() {
         return;  // Already running
     }
 
-    // Before deciding catchup, heal any torn transaction writes left by a crash
-    // under the old non-atomic write path (blocks committed without their
-    // transactions). Must run before perform_startup_check() so the catchup math
-    // sees the corrected tip.
-    int repaired_to = repair_torn_transaction_writes();
-    if (repaired_to >= 0) {
-        logger.warnf("BlockIndexer: Integrity repair rolled chain back to height {}; catchup will re-index the affected range", repaired_to);
-    }
-
     // Perform startup check to see if catchup is needed
     if (perform_startup_check()) {
         logger.info("BlockIndexer: Missing blocks detected - starting catchup indexing");
@@ -319,19 +310,8 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
             }
             else
             {
-                // Caught up to the tip for forward sync.
-                flag_syncing = false;
-
-                // Before idling, fill one chunk of any historical gap left by
-                // earlier partial-batch failures. Each call does bounded work and
-                // yields back here so new blocks are still picked up promptly
-                // between chunks.
-                if (backfill_next_gap(stop_token))
-                {
-                    continue;  // more gaps may remain; re-check tip then fill next
-                }
-
                 // Blockchain is fully synced - wait for new blocks via ZeroMQ events
+                flag_syncing = false;
                 update_sync_progress(BT_HEADERS, current_height, blockchain_height, "completed");
                 logger.infof("BlockIndexer: Block headers indexing completed at id {}", current_height);
 
@@ -825,192 +805,6 @@ std::string BlockIndexer::get_block_hash_from_db(int height) {
 
     PQclear(res);
     return hash;
-}
-
-int BlockIndexer::repair_torn_transaction_writes() {
-    PGconn* conn = static_cast<PGconn*>(db_connection_);
-    if (!conn || PQstatus(conn) != CONNECTION_OK) {
-        logger.warn("BlockIndexer: Integrity repair skipped - DB connection unavailable");
-        return -1;
-    }
-
-    // Lowest block whose committed transaction rows don't match its recorded
-    // tx_count. tx_count is written authoritatively from the block header, so a
-    // mismatch means some/all of that block's transactions were lost to a torn
-    // write (block committed, transactions did not). A correct block always has
-    // at least its coinbase, so COUNT(*) == tx_count for healthy blocks.
-    const char* detect_sql =
-        "SELECT MIN(b.height) "
-        "FROM blocks b "
-        "LEFT JOIN (SELECT block_height, COUNT(*) AS c FROM transactions GROUP BY block_height) t "
-        "  ON t.block_height = b.height "
-        "WHERE COALESCE(t.c, 0) <> b.tx_count";
-
-    PGresult* res = PQexec(conn, detect_sql);
-    if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-        logger.warnf("BlockIndexer: Integrity repair detection query failed: {}", PQerrorMessage(conn));
-        if (res) PQclear(res);
-        return -1;
-    }
-
-    // MIN over zero matching rows yields a single row holding NULL.
-    bool has_damage = PQntuples(res) > 0 && !PQgetisnull(res, 0, 0);
-    int lowest_damaged = has_damage ? atoi(PQgetvalue(res, 0, 0)) : -1;
-    PQclear(res);
-
-    if (!has_damage) {
-        logger.info("BlockIndexer: Integrity check passed - every indexed block has its transactions");
-        return -1;
-    }
-
-    if (lowest_damaged <= 0) {
-        // Genesis itself is inconsistent — refuse an auto-wipe-and-resync of the
-        // entire chain. Surface it loudly for manual handling instead.
-        logger.errorf("BlockIndexer: Integrity check found damage at genesis (height {}); manual re-sync required, skipping auto-repair", lowest_damaged);
-        return -1;
-    }
-
-    int target_height = lowest_damaged - 1;  // last known-good height
-    logger.warnf("BlockIndexer: Integrity check FAILED - lowest block with missing transactions is {}; rolling back to {} for clean re-index",
-                 lowest_damaged, target_height);
-
-    // Delete the damaged range (and everything above it) and rewind the headers
-    // pointer in a single transaction, so a crash mid-repair still leaves a
-    // consistent prefix. The normal catchup then re-indexes from target+1.
-    std::string target_str = std::to_string(target_height);
-    const char* params[] = { target_str.c_str() };
-
-    res = PQexec(conn, "BEGIN");
-    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
-        logger.errorf("BlockIndexer: Integrity repair BEGIN failed: {}", PQerrorMessage(conn));
-        if (res) PQclear(res);
-        return -1;
-    }
-    PQclear(res);
-
-    const char* repair_queries[] = {
-        "DELETE FROM transactions WHERE block_height > $1",
-        "DELETE FROM blocks WHERE height > $1",
-        "SELECT update_sync_progress('headers', $1, "
-        "(SELECT COALESCE(MAX(total_height), 0) FROM sync_progress WHERE name = 'headers'), "
-        "$1, 'syncing', '')"
-    };
-
-    for (const char* q : repair_queries) {
-        res = PQexecParams(conn, q, 1, nullptr, params, nullptr, nullptr, 0);
-        ExecStatusType st = res ? PQresultStatus(res) : PGRES_FATAL_ERROR;
-        if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) {
-            logger.errorf("BlockIndexer: Integrity repair query failed: {}", PQerrorMessage(conn));
-            if (res) PQclear(res);
-            PGresult* rb = PQexec(conn, "ROLLBACK");
-            if (rb) PQclear(rb);
-            return -1;
-        }
-        PQclear(res);
-    }
-
-    res = PQexec(conn, "COMMIT");
-    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
-        logger.errorf("BlockIndexer: Integrity repair COMMIT failed: {}", PQerrorMessage(conn));
-        if (res) PQclear(res);
-        PGresult* rb = PQexec(conn, "ROLLBACK");
-        if (rb) PQclear(rb);
-        return -1;
-    }
-    PQclear(res);
-
-    return target_height;
-}
-
-bool BlockIndexer::backfill_next_gap(std::stop_token stop_token) {
-    PGconn* conn = static_cast<PGconn*>(db_connection_);
-    if (!conn || PQstatus(conn) != CONNECTION_OK) {
-        return false;
-    }
-
-    // Lazily load every missing range once (one window scan), then drain it over
-    // successive idle cycles. New gaps should not form post-fix, so a single load
-    // per process run is sufficient; a restart re-scans.
-    if (!backfill_loaded_) {
-        PGresult* res = PQexec(conn,
-            "SELECT gap_start, gap_end FROM ("
-            "  SELECT height + 1 AS gap_start, "
-            "         LEAD(height) OVER (ORDER BY height) - 1 AS gap_end "
-            "  FROM blocks"
-            ") s "
-            "WHERE gap_end >= gap_start "
-            "ORDER BY gap_start");
-
-        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-            logger.warnf("BlockIndexer: Gap scan failed: {}", PQerrorMessage(conn));
-            if (res) PQclear(res);
-            return false;
-        }
-
-        int rows = PQntuples(res);
-        long total_missing = 0;
-        backfill_ranges_.clear();
-        backfill_ranges_.reserve(rows);
-        for (int i = 0; i < rows; ++i) {
-            int gs = atoi(PQgetvalue(res, i, 0));
-            int ge = atoi(PQgetvalue(res, i, 1));
-            if (ge >= gs) {
-                backfill_ranges_.emplace_back(gs, ge);
-                total_missing += (ge - gs + 1);
-            }
-        }
-        PQclear(res);
-
-        backfill_cursor_ = 0;
-        backfill_loaded_ = true;
-
-        if (backfill_ranges_.empty()) {
-            logger.info("BlockIndexer: Gap backfill - no missing blocks, chain is contiguous");
-        } else {
-            logger.warnf("BlockIndexer: Gap backfill - {} missing block(s) across {} range(s); filling while idle at tip",
-                         total_missing, backfill_ranges_.size());
-        }
-    }
-
-    if (backfill_cursor_ >= backfill_ranges_.size()) {
-        return false;  // all gaps drained
-    }
-
-    auto& range = backfill_ranges_[backfill_cursor_];
-    int gap_start = range.first;
-    int gap_end   = range.second;
-
-    // Bound each call to one chunk so a large contiguous gap doesn't starve
-    // new-block indexing; leave the remainder for the next idle cycle.
-    int chunk_end = std::min(gap_end, gap_start + BACKFILL_CHUNK - 1);
-
-    logger.infof("BlockIndexer: Backfilling missing blocks {} - {} (range {} - {})",
-                 gap_start, chunk_end, gap_start, gap_end);
-
-    flag_backfilling.store(true, std::memory_order_release);
-    bool ok = index_chain_data_batch(stop_token, BT_HEADERS, gap_start, chunk_end);
-    flag_backfilling.store(false, std::memory_order_release);
-
-    if (stop_token.stop_requested()) {
-        return false;
-    }
-
-    if (!ok) {
-        // Leave this range in place and stop backfilling this cycle; the idle
-        // loop retries after its wait. Advance the cursor past it so a single
-        // persistently-bad range can't wedge the whole backfill.
-        logger.warnf("BlockIndexer: Backfill of {} - {} failed; skipping range", gap_start, chunk_end);
-        backfill_cursor_++;
-        return true;
-    }
-
-    if (chunk_end < gap_end) {
-        range.first = chunk_end + 1;  // more of this range remains
-    } else {
-        backfill_cursor_++;           // range complete
-    }
-
-    return true;
 }
 
 bool BlockIndexer::detect_reorg(int height_to_check) {
@@ -1698,17 +1492,11 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
 
                     // Persist the headers pointer inside the same transaction so
                     // sync_progress can never point past committed blocks/txs.
-                    // Skip during gap backfill: those blocks are below the tip, so
-                    // advancing (or rewinding) the forward-sync pointer to a gap
-                    // height would re-index already-present blocks.
-                    if (!flag_backfilling.load(std::memory_order_acquire))
-                    {
-                        int total_h = progress_total_height.load(std::memory_order_acquire);
-                        if (total_h < fetched_data_batch.end_height) total_h = fetched_data_batch.end_height;
-                        txn.exec(std::format(
-                            "SELECT update_sync_progress('headers', {}, {}, {}, 'syncing', '')",
-                            fetched_data_batch.end_height, total_h, fetched_data_batch.end_height));
-                    }
+                    int total_h = progress_total_height.load(std::memory_order_acquire);
+                    if (total_h < fetched_data_batch.end_height) total_h = fetched_data_batch.end_height;
+                    txn.exec(std::format(
+                        "SELECT update_sync_progress('headers', {}, {}, {}, 'syncing', '')",
+                        fetched_data_batch.end_height, total_h, fetched_data_batch.end_height));
 
                     txn.commit();
                 }
@@ -1739,12 +1527,6 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
                     batch_timing = timing;
                 }
 
-                // Forward-sync progress/speed tracking is keyed to the rising tip.
-                // Gap backfill processes low historical heights, so skip these
-                // updates entirely while backfilling to avoid corrupting the
-                // current-height, speed window, and ETA.
-                if (!flag_backfilling.load(std::memory_order_acquire))
-                {
                 progress_current_height = fetched_data_batch.end_height;
                 record_speed_sample(fetched_data_batch.end_height);
                 int current_height = progress_current_height;
@@ -1790,7 +1572,6 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
 
                     progress_recent_window_start_height = new_window_start;
                 }
-                }  // end if (!flag_backfilling)
 
                 // Explicitly free batch data to ensure memory is returned to OS
                 fetched_data_batch.heights.clear();
