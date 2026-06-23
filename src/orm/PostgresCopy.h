@@ -217,3 +217,48 @@ CopyResult execute_copy(const std::string& table_name, const std::vector<std::st
 CopyResult execute_copy_binary(const std::string& table_name,
                              const std::vector<std::string>& columns,
                              const BinaryCopyBuffer& buf);
+
+/**
+ * @brief Atomic multi-COPY transaction over a single pinned COPY connection.
+ *
+ * Groups several COPY operations (and optional bookkeeping statements) into one
+ * database transaction so they commit or roll back as a unit. Used by the
+ * indexer to write a block sub-batch's `blocks` rows, its `transactions` rows,
+ * and the `sync_progress` pointer atomically — a crash anywhere rolls the whole
+ * sub-batch back to a consistent prefix that is re-synced from RPC on restart.
+ *
+ * Usage:
+ *   CopyTxn txn;                              // acquires a connection + BEGIN
+ *   txn.copy_binary("blocks", cols, blk_buf);
+ *   txn.copy_binary("transactions", cols, tx_buf);
+ *   txn.exec("SELECT update_sync_progress('headers', 100, 100, 100, 'syncing', '')");
+ *   txn.commit();                            // COMMIT; without this the dtor rolls back
+ *
+ * Any method throws std::runtime_error on failure. If the object is destroyed
+ * without a successful commit() (e.g. an exception propagated), the transaction
+ * is rolled back and the connection is recovered before returning to the pool.
+ * Not copyable; intended for use within a single thread.
+ */
+class CopyTxn
+{
+public:
+    CopyTxn();   // acquire a pooled COPY connection and issue BEGIN
+    ~CopyTxn();  // ROLLBACK + connection recovery unless commit() succeeded
+
+    CopyTxn(const CopyTxn&)            = delete;
+    CopyTxn& operator=(const CopyTxn&) = delete;
+
+    CopyResult copy_binary(const std::string& table_name,
+                           const std::vector<std::string>& columns,
+                           const BinaryCopyBuffer& buf);
+
+    // Execute an arbitrary command/query inside the transaction (e.g. the
+    // sync_progress update). Throws on server error.
+    void exec(const std::string& sql);
+
+    void commit();
+
+private:
+    void* conn_ = nullptr;     // PGconn* (opaque to keep libpq out of this header)
+    bool  committed_ = false;
+};

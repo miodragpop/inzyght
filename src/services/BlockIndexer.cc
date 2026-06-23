@@ -117,6 +117,15 @@ void BlockIndexer::start() {
         return;  // Already running
     }
 
+    // Before deciding catchup, heal any torn transaction writes left by a crash
+    // under the old non-atomic write path (blocks committed without their
+    // transactions). Must run before perform_startup_check() so the catchup math
+    // sees the corrected tip.
+    int repaired_to = repair_torn_transaction_writes();
+    if (repaired_to >= 0) {
+        logger.warnf("BlockIndexer: Integrity repair rolled chain back to height {}; catchup will re-index the affected range", repaired_to);
+    }
+
     // Perform startup check to see if catchup is needed
     if (perform_startup_check()) {
         logger.info("BlockIndexer: Missing blocks detected - starting catchup indexing");
@@ -294,11 +303,17 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
 
                 if (index_chain_data_batch(stop_token, BT_HEADERS, current_height + 1, batch_end))
                 {
-                    update_sync_progress(BT_HEADERS, batch_end, blockchain_height, "syncing");
+                    // The consumer already advanced sync_progress atomically with
+                    // each committed sub-batch; refresh status/total at the height
+                    // actually committed (== batch_end on full success).
+                    update_sync_progress(BT_HEADERS, progress_current_height.load(std::memory_order_acquire), blockchain_height, "syncing");
                 }
                 else
                 {
-                    update_sync_progress(BT_HEADERS, current_height, blockchain_height, "error", "Failed to index block batch");
+                    // Partial failure: report the error at the last committed
+                    // height, NOT current_height — moving the pointer back would
+                    // re-COPY already-committed sub-batches and hit PK violations.
+                    update_sync_progress(BT_HEADERS, progress_current_height.load(std::memory_order_acquire), blockchain_height, "error", "Failed to index block batch");
                     interruptible_sleep(stop_token, 10);
                 }
             }
@@ -448,6 +463,14 @@ bool BlockIndexer::index_chain_data_batch(std::stop_token stop_token, batch_type
         }
         if (db_consumer_thread.joinable()) {
             db_consumer_thread.join();
+        }
+
+        // Report the consumer's outcome to the caller so it never advances the
+        // sync pointer past a batch that failed to fully commit.
+        if (flag_consumer_failed.load(std::memory_order_acquire))
+        {
+            logger.warnf("BlockIndexer: Parallel {} batch processing ended with consumer failure", batch_type_string(bt));
+            return false;
         }
 
         logger.infof("BlockIndexer: Parallel {} batch processing complete", batch_type_string(bt));
@@ -791,6 +814,101 @@ std::string BlockIndexer::get_block_hash_from_db(int height) {
 
     PQclear(res);
     return hash;
+}
+
+int BlockIndexer::repair_torn_transaction_writes() {
+    PGconn* conn = static_cast<PGconn*>(db_connection_);
+    if (!conn || PQstatus(conn) != CONNECTION_OK) {
+        logger.warn("BlockIndexer: Integrity repair skipped - DB connection unavailable");
+        return -1;
+    }
+
+    // Lowest block whose committed transaction rows don't match its recorded
+    // tx_count. tx_count is written authoritatively from the block header, so a
+    // mismatch means some/all of that block's transactions were lost to a torn
+    // write (block committed, transactions did not). A correct block always has
+    // at least its coinbase, so COUNT(*) == tx_count for healthy blocks.
+    const char* detect_sql =
+        "SELECT MIN(b.height) "
+        "FROM blocks b "
+        "LEFT JOIN (SELECT block_height, COUNT(*) AS c FROM transactions GROUP BY block_height) t "
+        "  ON t.block_height = b.height "
+        "WHERE COALESCE(t.c, 0) <> b.tx_count";
+
+    PGresult* res = PQexec(conn, detect_sql);
+    if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logger.warnf("BlockIndexer: Integrity repair detection query failed: {}", PQerrorMessage(conn));
+        if (res) PQclear(res);
+        return -1;
+    }
+
+    // MIN over zero matching rows yields a single row holding NULL.
+    bool has_damage = PQntuples(res) > 0 && !PQgetisnull(res, 0, 0);
+    int lowest_damaged = has_damage ? atoi(PQgetvalue(res, 0, 0)) : -1;
+    PQclear(res);
+
+    if (!has_damage) {
+        logger.info("BlockIndexer: Integrity check passed - every indexed block has its transactions");
+        return -1;
+    }
+
+    if (lowest_damaged <= 0) {
+        // Genesis itself is inconsistent — refuse an auto-wipe-and-resync of the
+        // entire chain. Surface it loudly for manual handling instead.
+        logger.errorf("BlockIndexer: Integrity check found damage at genesis (height {}); manual re-sync required, skipping auto-repair", lowest_damaged);
+        return -1;
+    }
+
+    int target_height = lowest_damaged - 1;  // last known-good height
+    logger.warnf("BlockIndexer: Integrity check FAILED - lowest block with missing transactions is {}; rolling back to {} for clean re-index",
+                 lowest_damaged, target_height);
+
+    // Delete the damaged range (and everything above it) and rewind the headers
+    // pointer in a single transaction, so a crash mid-repair still leaves a
+    // consistent prefix. The normal catchup then re-indexes from target+1.
+    std::string target_str = std::to_string(target_height);
+    const char* params[] = { target_str.c_str() };
+
+    res = PQexec(conn, "BEGIN");
+    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
+        logger.errorf("BlockIndexer: Integrity repair BEGIN failed: {}", PQerrorMessage(conn));
+        if (res) PQclear(res);
+        return -1;
+    }
+    PQclear(res);
+
+    const char* repair_queries[] = {
+        "DELETE FROM transactions WHERE block_height > $1",
+        "DELETE FROM blocks WHERE height > $1",
+        "SELECT update_sync_progress('headers', $1, "
+        "(SELECT COALESCE(MAX(total_height), 0) FROM sync_progress WHERE name = 'headers'), "
+        "$1, 'syncing', '')"
+    };
+
+    for (const char* q : repair_queries) {
+        res = PQexecParams(conn, q, 1, nullptr, params, nullptr, nullptr, 0);
+        ExecStatusType st = res ? PQresultStatus(res) : PGRES_FATAL_ERROR;
+        if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) {
+            logger.errorf("BlockIndexer: Integrity repair query failed: {}", PQerrorMessage(conn));
+            if (res) PQclear(res);
+            PGresult* rb = PQexec(conn, "ROLLBACK");
+            if (rb) PQclear(rb);
+            return -1;
+        }
+        PQclear(res);
+    }
+
+    res = PQexec(conn, "COMMIT");
+    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
+        logger.errorf("BlockIndexer: Integrity repair COMMIT failed: {}", PQerrorMessage(conn));
+        if (res) PQclear(res);
+        PGresult* rb = PQexec(conn, "ROLLBACK");
+        if (rb) PQclear(rb);
+        return -1;
+    }
+    PQclear(res);
+
+    return target_height;
 }
 
 bool BlockIndexer::detect_reorg(int height_to_check) {
@@ -1452,37 +1570,46 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
                 timing.prep_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     copy_start - db_start).count();
 
+                // Atomic write: blocks, their transactions, and the persisted
+                // headers pointer all commit together (or all roll back). This
+                // closes the torn-write window where a crash between the two
+                // COPYs left blocks without their transactions — which, because
+                // restart resumes from MAX(blocks.height), could never be
+                // backfilled. A rolled-back sub-batch is simply re-fetched from
+                // RPC on the next pass.
                 try
                 {
+                    CopyTxn txn;
+
                     std::vector<std::string> block_columns {"height", "hash", "previous_hash", "timestamp", "difficulty", "size", "tx_count", "chain_supply", "transparent_supply", "sprout_supply", "sapling_supply", "miner_address", "claimed_reward_block", "claimed_reward_miner"};
 
-                    CopyResult result = execute_copy_binary("blocks", block_columns, block_copy_buf);
-                    logger.debugf("BlockIndexer: Consumer - COPY inserted {} blocks", result.rows_affected);
-                }
-                catch (const std::exception& e)
-                {
-                    logger.errorf("BlockIndexer: Consumer - COPY blocks failed: {}", e.what());
-                    flag_consumer_failed = true;
-                    backpressure_cv.notify_all();
-                    return;
-                }
+                    CopyResult block_result = txn.copy_binary("blocks", block_columns, block_copy_buf);
+                    logger.debugf("BlockIndexer: Consumer - COPY inserted {} blocks", block_result.rows_affected);
 
-                if (tx_index > 0)
-                {
-                    try
+                    if (tx_index > 0)
                     {
                         std::vector<std::string> tx_columns = {"hash", "block_height", "tx_index", "timestamp", "is_coinbase"};
 
-                        CopyResult result = execute_copy_binary("transactions", tx_columns, tx_copy_buf);
-                        logger.debugf("BlockIndexer: Consumer - COPY inserted {} transactions", result.rows_affected);
+                        CopyResult tx_result = txn.copy_binary("transactions", tx_columns, tx_copy_buf);
+                        logger.debugf("BlockIndexer: Consumer - COPY inserted {} transactions", tx_result.rows_affected);
                     }
-                    catch (const std::exception& e)
-                    {
-                        logger.errorf("BlockIndexer: Consumer - COPY transactions failed: {}", e.what());
-                        flag_consumer_failed = true;
-                        backpressure_cv.notify_all();
-                        return;
-                    }
+
+                    // Persist the headers pointer inside the same transaction so
+                    // sync_progress can never point past committed blocks/txs.
+                    int total_h = progress_total_height.load(std::memory_order_acquire);
+                    if (total_h < fetched_data_batch.end_height) total_h = fetched_data_batch.end_height;
+                    txn.exec(std::format(
+                        "SELECT update_sync_progress('headers', {}, {}, {}, 'syncing', '')",
+                        fetched_data_batch.end_height, total_h, fetched_data_batch.end_height));
+
+                    txn.commit();
+                }
+                catch (const std::exception& e)
+                {
+                    logger.errorf("BlockIndexer: Consumer - atomic block+tx COPY failed: {}", e.what());
+                    flag_consumer_failed = true;
+                    backpressure_cv.notify_all();
+                    return;
                 }
 
                 auto db_end = std::chrono::high_resolution_clock::now();

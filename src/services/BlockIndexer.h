@@ -151,6 +151,13 @@ class BlockIndexer
         // Initialize database connection
         bool initialize_database();
 
+        // Startup integrity repair: find the lowest block whose committed
+        // transaction count disagrees with its recorded tx_count (a torn write
+        // from a pre-fix crash) and roll the chain back to just before it so the
+        // normal catchup re-indexes the affected range cleanly. Returns the
+        // height repaired back to, or -1 if the chain is already consistent.
+        int repair_torn_transaction_writes();
+
         // Reorg detection and handling (for chain reorganizations)
         bool detect_reorg(int height_to_check);
         int find_common_ancestor(int start_height);

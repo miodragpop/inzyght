@@ -262,6 +262,98 @@ void shutdown_copy_pool()
     }
 }
 
+// Run the COPY ... FROM STDIN protocol on an already-acquired connection.
+// Connection-agnostic so it can be driven either standalone (autocommit, via
+// execute_copy_internal) or inside an explicit transaction (via CopyTxn).
+// Throws on any protocol/server error; the caller owns connection recovery.
+static CopyResult copy_stream_on_conn(PGconn* conn, const std::string& table_name,
+                                      const std::vector<std::string>& columns,
+                                      const void* data, size_t data_size, bool binary)
+{
+    // Build COPY command
+    std::string copy_command = std::format("COPY {} (", table_name);
+    for (size_t i = 0; i < columns.size(); ++i)
+    {
+        if (i > 0) copy_command.append(", ");
+        copy_command.append(columns[i]);
+    }
+    copy_command.append(binary ? ") FROM STDIN BINARY" : ") FROM STDIN");
+
+    PGresult* res = PQexec(conn, copy_command.c_str());
+
+    if (!res)
+    {
+        throw std::runtime_error(std::format("COPY command failed: {}", PQerrorMessage(conn)));
+    }
+
+    ExecStatusType status = PQresultStatus(res);
+    PQclear(res);
+
+    if (status != PGRES_COPY_IN)
+    {
+        throw std::runtime_error(std::format("COPY not in correct state: {}", PQresStatus(status)));
+    }
+
+    // Stream the data
+    if (data_size > 0)
+    {
+        int put_result = PQputCopyData(conn, static_cast<const char*>(data), static_cast<int>(data_size));
+
+        if (put_result == -1)
+        {
+            throw std::runtime_error(std::format("PQputCopyData failed: {}", PQerrorMessage(conn)));
+        }
+
+        if (put_result == 0)
+        {
+            Logger::instance().warn("PQputCopyData would block");
+        }
+    }
+
+    // Finish the COPY
+    int end_result = PQputCopyEnd(conn, nullptr);
+    if (end_result == -1)
+    {
+        throw std::runtime_error(std::format("PQputCopyEnd failed: {}", PQerrorMessage(conn)));
+    }
+
+    // Get final result
+    res = PQgetResult(conn);
+    if (!res)
+    {
+        throw std::runtime_error("No result from COPY");
+    }
+
+    status = PQresultStatus(res);
+
+    if (status != PGRES_COMMAND_OK)
+    {
+        std::string err_msg = PQresultErrorMessage(res);
+        PQclear(res);
+        throw std::runtime_error(std::format("COPY command failed: {}", err_msg));
+    }
+
+    // Get affected rows from result
+    char* tuples = PQcmdTuples(res);
+    int64_t rows_affected = 0;
+
+    if (tuples && tuples[0] != '\0')
+    {
+        try
+        {
+            rows_affected = std::stoll(tuples);
+        }
+        catch (const std::exception& e)
+        {
+            Logger::instance().warn(std::string("Failed to parse affected rows: ") + tuples);
+        }
+    }
+
+    PQclear(res);
+
+    return CopyResult{rows_affected, "COPY completed successfully", true};
+}
+
 CopyResult execute_copy_internal(const std::string& table_name, const std::vector<std::string>& columns, const void* data, size_t data_size, bool binary)
 {
     try {
@@ -274,89 +366,7 @@ CopyResult execute_copy_internal(const std::string& table_name, const std::vecto
         PGconn* raw_conn = pool.acquire();
         ConnectionGuard conn_guard(raw_conn);
 
-        // Build COPY command
-        std::string copy_command = std::format("COPY {} (", table_name);
-        for (size_t i = 0; i < columns.size(); ++i)
-        {
-            if (i > 0) copy_command.append(", ");
-            copy_command.append(columns[i]);
-        }
-        copy_command.append(binary ? ") FROM STDIN BINARY" : ") FROM STDIN");
-
-        PGresult* res = PQexec(raw_conn, copy_command.c_str());
-
-        if (!res)
-        {
-            throw std::runtime_error(std::format("COPY command failed: {}", PQerrorMessage(raw_conn)));
-        }
-
-        ExecStatusType status = PQresultStatus(res);
-        PQclear(res);
-
-        if (status != PGRES_COPY_IN)
-        {
-            throw std::runtime_error(std::format("COPY not in correct state: {}", PQresStatus(status)));
-        }
-
-        // Stream the data
-        if (data_size > 0)
-        {
-            int put_result = PQputCopyData(raw_conn, static_cast<const char*>(data), static_cast<int>(data_size));
-
-            if (put_result == -1)
-            {
-                throw std::runtime_error(std::format("PQputCopyData failed: {}", PQerrorMessage(raw_conn)));
-            }
-
-            if (put_result == 0)
-            {
-                Logger::instance().warn("PQputCopyData would block");
-            }
-        }
-
-        // Finish the COPY
-        int end_result = PQputCopyEnd(raw_conn, nullptr);
-        if (end_result == -1)
-        {
-            throw std::runtime_error(std::format("PQputCopyEnd failed: {}", PQerrorMessage(raw_conn)));
-        }
-
-        // Get final result
-        res = PQgetResult(raw_conn);
-        if (!res)
-        {
-            throw std::runtime_error("No result from COPY");
-        }
-
-        status = PQresultStatus(res);
-
-        if (status != PGRES_COMMAND_OK)
-        {
-            std::string err_msg = PQresultErrorMessage(res);
-            PQclear(res);
-            throw std::runtime_error(std::format("COPY command failed: {}", err_msg));
-        }
-
-        // Get affected rows from result
-        char* tuples = PQcmdTuples(res);
-        int64_t rows_affected = 0;
-
-        if (tuples && tuples[0] != '\0')
-        {
-            try
-            {
-                rows_affected = std::stoll(tuples);
-            }
-            catch (const std::exception& e)
-            {
-                Logger::instance().warn(std::string("Failed to parse affected rows: ") + tuples);
-            }
-        }
-
-        PQclear(res);
-
-        return CopyResult{rows_affected, "COPY completed successfully", true};
-
+        return copy_stream_on_conn(raw_conn, table_name, columns, data, data_size, binary);
     }
     catch (const std::exception& e)
     {
@@ -377,4 +387,97 @@ CopyResult execute_copy_binary(const std::string& table_name,
                              const BinaryCopyBuffer& buf)
 {
     return execute_copy_internal(table_name, columns, buf.data(), buf.size(), /*binary=*/true);
+}
+
+// ============================================================================
+// CopyTxn — group several COPYs (+ bookkeeping statements) into one atomic
+// transaction so blocks, their transactions, and the sync_progress pointer
+// either all commit together or all roll back together.
+// ============================================================================
+
+CopyTxn::CopyTxn()
+{
+    CopyConnectionPool& pool = CopyConnectionPool::instance();
+    if (!pool.is_initialized())
+    {
+        throw std::runtime_error("COPY pool not initialized. Call initialize_copy_pool() first");
+    }
+
+    PGconn* conn = pool.acquire();
+    PGresult* res = PQexec(conn, "BEGIN");
+    bool ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
+    if (res) PQclear(res);
+    if (!ok)
+    {
+        std::string err = PQerrorMessage(conn);
+        pool.release(conn);
+        throw std::runtime_error("CopyTxn: BEGIN failed: " + err);
+    }
+    conn_ = conn;
+}
+
+CopyTxn::~CopyTxn()
+{
+    if (!conn_) return;
+    PGconn* conn = static_cast<PGconn*>(conn_);
+
+    if (!committed_)
+    {
+        // Abort any COPY left mid-stream (no-op / harmless error if not in
+        // COPY_IN), drain pending results, then roll the transaction back.
+        PQputCopyEnd(conn, "CopyTxn aborted");
+        PGresult* r;
+        while ((r = PQgetResult(conn)) != nullptr) PQclear(r);
+        PGresult* rb = PQexec(conn, "ROLLBACK");
+        if (rb) PQclear(rb);
+    }
+
+    // A connection that is not cleanly idle (failed mid-COPY, broken socket)
+    // must not be handed back poisoned: reset it to a fresh backend and
+    // re-apply the COPY-session tuning before returning it to the pool.
+    if (PQstatus(conn) != CONNECTION_OK || PQtransactionStatus(conn) != PQTRANS_IDLE)
+    {
+        PQreset(conn);
+        if (PQstatus(conn) == CONNECTION_OK)
+        {
+            harden_pg_connection(conn, /*statement_timeout_ms=*/0);
+            tune_copy_connection(conn);
+        }
+    }
+
+    CopyConnectionPool::instance().release(conn);
+    conn_ = nullptr;
+}
+
+CopyResult CopyTxn::copy_binary(const std::string& table_name,
+                                const std::vector<std::string>& columns,
+                                const BinaryCopyBuffer& buf)
+{
+    if (!conn_) throw std::runtime_error("CopyTxn: no active connection");
+    return copy_stream_on_conn(static_cast<PGconn*>(conn_), table_name, columns,
+                               buf.data(), buf.size(), /*binary=*/true);
+}
+
+void CopyTxn::exec(const std::string& sql)
+{
+    if (!conn_) throw std::runtime_error("CopyTxn: no active connection");
+    PGconn* conn = static_cast<PGconn*>(conn_);
+    PGresult* res = PQexec(conn, sql.c_str());
+    ExecStatusType status = res ? PQresultStatus(res) : PGRES_FATAL_ERROR;
+    bool ok = (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK);
+    std::string err = ok ? "" : (res ? PQresultErrorMessage(res) : PQerrorMessage(conn));
+    if (res) PQclear(res);
+    if (!ok) throw std::runtime_error("CopyTxn: exec failed: " + err);
+}
+
+void CopyTxn::commit()
+{
+    if (!conn_) throw std::runtime_error("CopyTxn: no active connection");
+    PGconn* conn = static_cast<PGconn*>(conn_);
+    PGresult* res = PQexec(conn, "COMMIT");
+    bool ok = res && PQresultStatus(res) == PGRES_COMMAND_OK;
+    std::string err = ok ? "" : (res ? PQresultErrorMessage(res) : PQerrorMessage(conn));
+    if (res) PQclear(res);
+    if (!ok) throw std::runtime_error("CopyTxn: COMMIT failed: " + err);
+    committed_ = true;
 }
