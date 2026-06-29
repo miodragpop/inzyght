@@ -260,6 +260,10 @@
         over.addEventListener('mousedown', (e) => {
             if (e.button !== 0) return;
             const p = localPos(over, e);
+            // Shift+drag = box-zoom (else pan). On modifier-stripping setups
+            // (Opera/Wayland) a lone Shift is eaten, so users hold Ctrl+Shift —
+            // shiftKey survives on mouse events there; hence the Ctrl+Shift+drag
+            // hint. See public/js/network.js for the full note.
             if (e.shiftKey) {
                 gesture = { mode: 'zoom', startX: p.x, startY: p.y, box };
                 Object.assign(box.style, { display: 'block', left: p.x + 'px',
@@ -273,7 +277,10 @@
             e.preventDefault();
         });
 
-        // ── Ctrl+wheel to zoom x around the cursor ──
+        // ── Ctrl(+Shift)+wheel to zoom x around the cursor ──
+        // Hint documents Ctrl+Shift: some setups (Opera/Wayland) strip a lone
+        // modifier from input events, so users hold both and the gate keys off
+        // the one that survives (ctrlKey here). See public/js/network.js.
         over.addEventListener('wheel', (e) => {
             if (!e.ctrlKey) return;   // plain scroll still scrolls the page
             e.preventDefault();

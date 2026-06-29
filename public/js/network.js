@@ -163,6 +163,16 @@ $(document).ready(function() {
     initTable();
     fetchPeers();
 
+    // Gate jsvectormap's scroll-zoom behind a modifier so a plain wheel scrolls
+    // the page instead of getting trapped zooming the map. We deliberately key
+    // off ctrlKey ONLY (not shiftKey): the on-screen hint says Ctrl+Shift
+    // because some environments (observed: Opera on Wayland) consume a bare
+    // Ctrl+wheel as their own zoom/scroll gesture and strip the Ctrl modifier
+    // before it reaches the page — there, only Ctrl+Shift+wheel arrives with
+    // ctrlKey=true. Checking ctrlKey alone makes BOTH Ctrl+wheel (X11/most
+    // browsers) and Ctrl+Shift+wheel (the stripped-modifier case) zoom, so the
+    // documented Ctrl+Shift combo is a safe superset. Do NOT add a shiftKey
+    // check — it would break plain Ctrl+wheel on environments that don't strip.
     document.getElementById('peer-map').addEventListener('wheel', function(e) {
         if (!e.ctrlKey) e.stopImmediatePropagation();
     }, { capture: true, passive: true });
