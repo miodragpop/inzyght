@@ -139,8 +139,16 @@ class BlockIndexer
         // Get current blockchain height from RPC
         int get_blockchain_height();
 
-        // Get last indexed height from DB
+        // Get last indexed height from sync_progress checkpoint (may lag the
+        // actual committed tip, since it is only written per outer batch).
         int get_last_indexed_height();
+
+        // Get the authoritative committed tip: MAX(blocks.height). Because each
+        // block is committed atomically with its transactions, this is always
+        // the exact last fully-indexed height — unlike sync_progress, it never
+        // lags. Used to drive both resume and reorg detection. Returns -1 on a
+        // DB error (never 0, which would mean "genesis / nothing indexed").
+        int get_max_indexed_block_height();
 
         // Get current transactions count from DB
         int get_transactions_count() const;
@@ -244,6 +252,7 @@ class BlockIndexer
         std::condition_variable backpressure_cv;  // Signal when space becomes available in queue (producer backpressure relief)
         std::atomic<bool> flag_producer_stopped{false};  // Signal that producer has finished
         std::atomic<bool> flag_consumer_failed{false};  // Consumer aborted on error; producer must stop blocking on backpressure
+        std::atomic<bool> flag_reorg_suspected{false};  // Consumer hit a duplicate-txid COPY collision => an old-fork tip is still in the DB; main loop should run reorg recovery immediately
         std::atomic<int> pending_batch_count{0};  // Track number of queued batches for backpressure
         int max_queue_depth{5};  // Max batches queued (configurable, from config file)
 

@@ -206,7 +206,13 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
                 continue;
             }
 
-            int current_height = get_last_indexed_height();
+            // Resume from the authoritative committed tip — MAX(blocks.height) —
+            // NOT the sync_progress checkpoint. sync_progress is only written per
+            // outer batch, so it can lag the real tip by up to HEADERS_BATCH_SIZE
+            // blocks; driving resume/reorg-detection off a stale value would both
+            // re-COPY already-committed blocks (PK violations) and check the wrong
+            // height for reorgs.
+            int current_height = get_max_indexed_block_height();
             if (current_height < 0)
             {
                 // Couldn't read the indexed height (DB connection down or query
@@ -225,11 +231,16 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
             // This ensures the frontend sees progress even while large batches are being processed
             refresh_transaction_count_cache();
 
-            // Check for reorg before proceeding. We only need to look when our
-            // tip is within the daemon's reorg horizon — anything deeper is
-            // locked in. Inclusive boundary so a tip exactly MAX_REORG_DEPTH
-            // behind is still checked.
-            if (current_height >= blockchain_height - MAX_REORG_DEPTH && detect_reorg(current_height))
+            // Check for reorg before proceeding by comparing OUR committed tip's
+            // hash against the daemon's at the same height. This is intentionally
+            // NOT gated on proximity to blockchain_height: if we were down while a
+            // reorg happened and the new chain then advanced more than
+            // MAX_REORG_DEPTH blocks, our tip sits on an abandoned fork that is
+            // "far" from the new tip but still needs resolving. Forward-COPYing
+            // past such a stale tip is exactly what produces the duplicate-txid
+            // collision that aborts the batch. It is one getblockhash per cycle —
+            // negligible — and detect_reorg() self-guards height<=0/empty hashes.
+            if (detect_reorg(current_height))
             {
                 logger.warn("BlockIndexer: Reorg detected - finding common ancestor");
                 int common_ancestor = find_common_ancestor(current_height - 1);
@@ -294,10 +305,23 @@ void BlockIndexer::thread_func_indexer(std::stop_token stop_token)
 
                 if (index_chain_data_batch(stop_token, BT_HEADERS, current_height + 1, batch_end))
                 {
-                    // The consumer already advanced sync_progress atomically with
-                    // each committed sub-batch; refresh status/total at the height
-                    // actually committed (== batch_end on full success).
+                    // sync_progress is no longer written per sub-batch, so refresh
+                    // it here at the height actually committed (== batch_end on
+                    // full success). Resume/reorg detection read MAX(blocks.height)
+                    // directly, so this is for status/display, not correctness.
                     update_sync_progress(BT_HEADERS, progress_current_height.load(std::memory_order_acquire), blockchain_height, "syncing");
+                }
+                else if (flag_reorg_suspected.exchange(false, std::memory_order_acq_rel))
+                {
+                    // The batch aborted on a duplicate txid left by an unresolved
+                    // reorg (an abandoned fork tip still in the DB). Loop back so
+                    // the top-of-loop detect_reorg() finds the fork and rolls back
+                    // to the common ancestor. Brief sleep only — short enough to
+                    // recover fast, long enough that if detect_reorg can't reach
+                    // the daemon (transient RPC error) this can't spin hot.
+                    logger.warn("BlockIndexer: Batch aborted on duplicate txid; re-checking for reorg immediately");
+                    interruptible_sleep(stop_token, 2);
+                    continue;
                 }
                 else
                 {
@@ -378,6 +402,33 @@ int BlockIndexer::get_last_indexed_height()
     return current_height;
 }
 
+int BlockIndexer::get_max_indexed_block_height()
+{
+    PGconn* conn = static_cast<PGconn*>(db_connection_);
+
+    // Return -1 (not 0) on any error: a dead connection or failed query must NOT
+    // be mistaken for "genesis / nothing indexed", which would trigger a
+    // destructive re-sync from height 0 against an already-populated database.
+    if (!conn || PQstatus(conn) != CONNECTION_OK) {
+        return -1;
+    }
+
+    // COALESCE so an empty table yields a single "0" row (genesis), while a
+    // query/transport failure leaves the sentinel -1.
+    PGresult* res = PQexec(conn, "SELECT COALESCE(MAX(height), 0) FROM blocks");
+
+    int height = -1;
+    if (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0)
+    {
+        height = atoi(PQgetvalue(res, 0, 0));
+    }
+    if (res) {
+        PQclear(res);
+    }
+
+    return height;
+}
+
 int BlockIndexer::get_transactions_count() const
 {
     PGconn* conn = static_cast<PGconn*>(db_connection_);
@@ -435,6 +486,7 @@ bool BlockIndexer::index_chain_data_batch(std::stop_token stop_token, batch_type
         // Reset synchronization state
         flag_producer_stopped = false;
         flag_consumer_failed = false;
+        flag_reorg_suspected = false;
         pending_batch_count = 0;
         {
             std::scoped_lock<std::mutex> lock(queue_mutex);
@@ -1499,7 +1551,23 @@ void BlockIndexer::thread_func_db_consumer(std::stop_token stop_token)
                 }
                 catch (const std::exception& e)
                 {
-                    logger.errorf("BlockIndexer: Consumer - atomic block+tx COPY failed: {}", e.what());
+                    const std::string err = e.what();
+                    // A unique-violation on transactions.hash means a previously
+                    // committed block — the tip of an abandoned fork — still holds
+                    // a txid that the current chain now mines into a different
+                    // block. That is an unresolved reorg, not data corruption.
+                    // Flag it so the main loop runs reorg recovery immediately
+                    // instead of backing off and retrying the same doomed COPY.
+                    if (err.find("transactions_hash_key") != std::string::npos ||
+                        err.find("duplicate key") != std::string::npos)
+                    {
+                        logger.warnf("BlockIndexer: Consumer - duplicate txid on COPY (unresolved reorg — stale fork tip in DB): {}", err);
+                        flag_reorg_suspected.store(true, std::memory_order_release);
+                    }
+                    else
+                    {
+                        logger.errorf("BlockIndexer: Consumer - atomic block+tx COPY failed: {}", err);
+                    }
                     flag_consumer_failed = true;
                     backpressure_cv.notify_all();
                     return;
