@@ -490,6 +490,11 @@ YcashBlock YcashRpcClient::get_block_by_hash(const std::string& hash, int verbos
     if (ec) {
         throw std::runtime_error(std::format("Failed to parse block: {}", glz::format_error(ec, json_response)));
     }
+    // An RPC error payload ({"error":...}) parses "successfully" into a
+    // default-constructed block because unknown keys are ignored — detect it here.
+    if (block.hash.empty()) {
+        throw std::runtime_error("Block not found");
+    }
     return block;
 }
 
@@ -517,6 +522,9 @@ YcashBlockVerbose YcashRpcClient::get_block_verbose_by_hash(const std::string& h
     auto ec = glz::read<glz::opts{.error_on_unknown_keys = false}>(block, json_response);
     if (ec) {
         throw std::runtime_error(std::format("Failed to parse verbose block: {}", glz::format_error(ec, json_response)));
+    }
+    if (block.hash.empty()) {
+        throw std::runtime_error("Block not found");
     }
     return block;
 }
