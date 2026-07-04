@@ -159,6 +159,12 @@ class BlockIndexer
         // Initialize database connection
         bool initialize_database();
 
+        // Return db_connection_ ready for use, attempting a PQreset if the
+        // connection has gone bad (e.g. a postgres restart severed it).
+        // Returns nullptr if still unusable. void* to avoid the pg header
+        // dependency; only the indexer thread may call this.
+        void* ensure_db_connection();
+
         // Reorg detection and handling (for chain reorganizations)
         bool detect_reorg(int height_to_check);
         int find_common_ancestor(int start_height);

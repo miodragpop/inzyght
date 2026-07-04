@@ -375,14 +375,38 @@ int BlockIndexer::get_blockchain_height()
     return -1;
 }
 
-int BlockIndexer::get_last_indexed_height()
+void* BlockIndexer::ensure_db_connection()
 {
     PGconn* conn = static_cast<PGconn*>(db_connection_);
+    if (!conn) {
+        return nullptr;
+    }
+    if (PQstatus(conn) == CONNECTION_OK) {
+        return conn;
+    }
+
+    // The connection was severed (postgres restart, killed backend, dropped
+    // TCP session). PQreset re-establishes it in place; without this the
+    // indexer would stay wedged on a dead connection until process restart.
+    logger.warn("BlockIndexer DB: connection lost, attempting reset...");
+    PQreset(conn);
+    if (PQstatus(conn) != CONNECTION_OK) {
+        logger.warnf("BlockIndexer DB: reset failed: {}", PQerrorMessage(conn));
+        return nullptr;
+    }
+    harden_pg_connection(conn);
+    logger.info("BlockIndexer DB: connection re-established");
+    return conn;
+}
+
+int BlockIndexer::get_last_indexed_height()
+{
+    PGconn* conn = static_cast<PGconn*>(ensure_db_connection());
 
     // Return -1 (not 0) on any error: a dead connection or failed query must NOT
     // be mistaken for "genesis / nothing indexed", which would trigger a
     // destructive re-sync from height 0 against an already-populated database.
-    if (!conn || PQstatus(conn) != CONNECTION_OK) {
+    if (!conn) {
         return -1;
     }
 
@@ -404,12 +428,12 @@ int BlockIndexer::get_last_indexed_height()
 
 int BlockIndexer::get_max_indexed_block_height()
 {
-    PGconn* conn = static_cast<PGconn*>(db_connection_);
+    PGconn* conn = static_cast<PGconn*>(ensure_db_connection());
 
     // Return -1 (not 0) on any error: a dead connection or failed query must NOT
     // be mistaken for "genesis / nothing indexed", which would trigger a
     // destructive re-sync from height 0 against an already-populated database.
-    if (!conn || PQstatus(conn) != CONNECTION_OK) {
+    if (!conn) {
         return -1;
     }
 
